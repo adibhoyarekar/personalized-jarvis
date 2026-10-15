@@ -2,9 +2,10 @@
 
 Engines only implement :meth:`TTSEngine.synthesize` (text -> samples). The base
 class runs two background threads: one synthesises queued sentences, the other
-plays them in order. While one sentence plays, the next is already being
-synthesised, so multi-sentence replies flow without gaps. :meth:`stop` cuts
-playback off within a few milliseconds and drops everything queued.
+plays them in order. While sentence N plays, sentence N+1 is already being
+synthesised (prefetch), so multi-sentence replies flow without gaps.
+:meth:`stop` cuts playback off within ~40 ms, drops everything queued and
+abandons any synthesis request still in flight.
 """
 
 from __future__ import annotations
@@ -32,6 +33,10 @@ class TTSError(RuntimeError):
     """Speech synthesis/playback failed."""
 
 
+class SynthesisCancelled(Exception):
+    """Raised inside :meth:`TTSEngine.synthesize` when the request became stale."""
+
+
 class TTSEngine(abc.ABC):
     """Base class: queueing, background synthesis and interruptible playback.
 
@@ -53,12 +58,25 @@ class TTSEngine(abc.ABC):
         self._cond = threading.Condition()
         self._threads: list[threading.Thread] = []
         self._closed = False
+        self._synth_gen = -1
+        self._playing = False
+        #: Called with True when audio starts playing and False when all queued
+        #: speech has finished (or was stopped). Used for the SPEAKING state.
+        self.on_activity: Callable[[bool], None] | None = None
 
     # -- to implement --------------------------------------------------------
 
     @abc.abstractmethod
     def synthesize(self, text: str) -> tuple[np.ndarray, int]:
-        """Return (mono float32 samples, sample_rate) for ``text``."""
+        """Return (mono float32 samples, sample_rate) for ``text``.
+
+        Long-running engines should check :meth:`synthesis_cancelled` and raise
+        :class:`SynthesisCancelled` so a barge-in doesn't wait for stale audio.
+        """
+
+    def synthesis_cancelled(self) -> bool:
+        """True if the sentence being synthesised was cancelled by :meth:`stop`."""
+        return self._synth_gen != self._generation
 
     # -- public API ----------------------------------------------------------
 
@@ -85,6 +103,7 @@ class TTSEngine(abc.ABC):
                     q.get_nowait()
             except queue.Empty:
                 pass
+        self._set_playing(False)
 
     @property
     def is_speaking(self) -> bool:
@@ -125,7 +144,20 @@ class TTSEngine(abc.ABC):
         with self._cond:
             if gen == self._generation and self._pending > 0:
                 self._pending -= 1
+            idle = self._pending == 0
             self._cond.notify_all()
+        if idle:
+            self._set_playing(False)
+
+    def _set_playing(self, playing: bool) -> None:
+        if playing == self._playing:
+            return
+        self._playing = playing
+        if self.on_activity is not None:
+            try:
+                self.on_activity(playing)
+            except Exception:  # noqa: BLE001
+                log.exception("TTS activity callback failed")
 
     def _report(self, text: str, exc: Exception) -> None:
         log.warning("%s TTS failed for %r: %s", self.name, text[:60], exc)
@@ -143,8 +175,12 @@ class TTSEngine(abc.ABC):
             gen, text = item
             if not self._is_current(gen):
                 continue
+            self._synth_gen = gen
             try:
                 samples, rate = self.synthesize(text)
+            except SynthesisCancelled:
+                log.debug("Synthesis cancelled: %r", text[:40])
+                continue
             except Exception as exc:  # noqa: BLE001
                 self._report(text, exc)
                 self._done_one(gen)
@@ -187,6 +223,8 @@ class TTSEngine(abc.ABC):
                         stream_rate = rate
                     if device_rate != rate:
                         samples = _resample(samples, rate, device_rate)
+                    if self._is_current(gen):
+                        self._set_playing(True)
                     if not self._write(stream, samples, device_rate, gen):
                         stream.abort()  # interrupted: drop buffered audio now
                         stream.close()
@@ -276,6 +314,8 @@ class EdgeTTSEngine(TTSEngine):
         communicate = edge_tts.Communicate(text, self.voice, rate=self.rate, volume=self.volume)
         audio = bytearray()
         async for chunk in communicate.stream():
+            if self.synthesis_cancelled():
+                raise SynthesisCancelled
             if chunk.get("type") == "audio":
                 audio.extend(chunk["data"])
         return bytes(audio)
@@ -285,6 +325,8 @@ class EdgeTTSEngine(TTSEngine):
             self._loop = asyncio.new_event_loop()
         try:
             mp3 = self._loop.run_until_complete(asyncio.wait_for(self._fetch(text), timeout=15))
+        except SynthesisCancelled:
+            raise
         except Exception as exc:  # noqa: BLE001 - aiohttp/edge_tts errors vary
             raise TTSError(f"edge-tts request failed (is the internet up?): {exc}") from exc
         if not mp3:

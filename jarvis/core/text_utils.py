@@ -109,3 +109,51 @@ def strip_markdown(text: str) -> str:
     text = re.sub(r"\s{2,}", " ", text)
     text = re.sub(r"\s+([,.!?;:])", r"\1", text)
     return text.strip(" ,")
+
+
+# ---------------------------------------------------------------------------
+# Voice conversation helpers
+# ---------------------------------------------------------------------------
+
+EXIT_PHRASES = (
+    "thanks", "thank you", "thanks a lot", "thank you very much", "cheers",
+    "that's all", "that is all", "that's it", "that'll be all", "that will be all",
+    "stop listening", "never mind", "nevermind", "nothing", "no thanks", "no thank you",
+    "goodbye", "bye", "bye bye", "good night", "i'm done", "i'm good", "we're done",
+    "all good", "that's everything", "no", "nope", "not now",
+)
+_FILLER_WORDS = {"ok", "okay", "great", "perfect", "cool", "alright", "right", "jarvis", "hey", "so", "oh"}
+
+
+def _normalize(text: str) -> str:
+    text = text.lower().replace("’", "'")
+    text = re.sub(r"[^a-z' ]", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def is_exit_phrase(text: str) -> bool:
+    """True if the utterance just ends the conversation ("thanks", "that's all", "stop listening").
+
+    Only short utterances count, so "thanks, now open Spotify" is still a request.
+    """
+    words = [w for w in _normalize(text).split() if w not in _FILLER_WORDS]
+    if not words or len(words) > 6:
+        return False
+    phrase = " ".join(words)
+    for exit_phrase in EXIT_PHRASES:
+        if phrase == exit_phrase:
+            return True
+        if phrase.startswith(exit_phrase + " "):
+            rest = phrase[len(exit_phrase) + 1 :].split()
+            if len(rest) <= 2 and not set(rest) & {"open", "play", "search", "set", "what", "how", "tell"}:
+                return True  # "thanks a bunch", "that's all for now"
+    return False
+
+
+_WAKE_PREFIX = re.compile(r"^\W*(?:(?:hey|hi|okay|ok)[\s,]+)?jarvis\b[\s,.!?]*", re.IGNORECASE)
+
+
+def strip_wake_phrase(text: str) -> str:
+    """Remove a leading "Hey Jarvis," that slipped into the recording."""
+    stripped = _WAKE_PREFIX.sub("", text, count=1).strip()
+    return stripped[:1].upper() + stripped[1:] if stripped else ""

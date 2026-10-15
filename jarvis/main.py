@@ -1,12 +1,13 @@
 """Jarvis entry point.
 
 Usage:
-    python main.py                   # same as --push-to-talk
+    python main.py                   # same as --wake
+    python main.py --wake            # say "Hey Jarvis" hands-free (F9 also works)
     python main.py --push-to-talk    # hold the hotkey (F9), speak, release
-    python main.py --text            # type to Jarvis, read replies (debug mode)
+    python main.py --text            # type to Jarvis, read replies
     python main.py --text --speak    # type, and hear the replies
-    python main.py --wake            # say "Jarvis" hands-free        (Phase 3)
     python main.py --list-devices    # show audio devices and their indexes
+    python main.py --debug           # any mode: show state changes and wake word scores
 """
 
 from __future__ import annotations
@@ -35,7 +36,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     mode.add_argument("--list-devices", action="store_true", help="list audio input/output devices")
     parser.add_argument("--speak", action="store_true", help="with --text: also speak replies")
     parser.add_argument("--config", type=Path, default=None, help="path to config.yaml")
-    parser.add_argument("--debug", action="store_true", help="verbose logging (logs/jarvis.log)")
+    parser.add_argument(
+        "--debug", action="store_true", help="print state changes and wake word scores; verbose log file"
+    )
     return parser.parse_args(argv)
 
 
@@ -142,12 +145,63 @@ def make_tts(config: Config, on_error=None) -> TTSEngine | None:  # type: ignore
         return None
 
 
-def run_voice_mode(config: Config) -> int:
-    """Push-to-talk voice loop. Returns a process exit code."""
+def _build_pipeline(config: Config, recorder, wake_wanted: bool, debug: bool):  # type: ignore[no-untyped-def]
+    """Create the wake word + VAD pipeline, or None to run push-to-talk only."""
+    from core.audio_in import (
+        AudioPipeline,
+        BargeInDetector,
+        EndpointConfig,
+        WakeWordDetector,
+        WakeWordError,
+        create_vad,
+    )
+    from core.voice import WakeScoreMonitor
+
+    if not wake_wanted:
+        return None
+    threshold = float(config.get("wake.threshold", 0.5))
+    model = str(config.get("wake.model", "hey_jarvis"))
+    try:
+        wake = WakeWordDetector(
+            model=model,
+            threshold=threshold,
+            cooldown_s=float(config.get("wake.cooldown", 1.5)),
+            on_score=WakeScoreMonitor(threshold) if debug else None,
+        )
+    except WakeWordError as exc:
+        print(f"WARNING: wake word unavailable ({exc}).\nFalling back to push-to-talk.\n")
+        log.warning("Wake word unavailable: %s", exc)
+        return None
+
+    vad = create_vad(str(config.get("vad.engine", "silero")))
+    print(f"Wake word '{model}' ready (threshold {threshold}); voice detection: {vad.name}.")
+    headphones = bool(config.get("audio.headphones", False))
+    endpoint = EndpointConfig(
+        silence_timeout=float(config.get("vad.silence_timeout", 1.0)),
+        max_utterance=float(config.get("vad.max_utterance", 15)),
+        min_speech=float(config.get("vad.min_speech", 0.3)),
+        preroll=float(config.get("vad.preroll", 0.5)),
+        start_timeout=float(config.get("wake.listen_timeout", 5.0)),
+    )
+    return AudioPipeline(
+        recorder,
+        vad,
+        endpoint,
+        wake=wake,
+        vad_threshold=float(config.get("vad.threshold", 0.5)),
+        # Voice barge-in only with headphones; on speakers Jarvis would hear itself.
+        barge_in=BargeInDetector(float(config.get("barge_in.min_speech", 0.4))) if headphones else None,
+        wake_listen_timeout=float(config.get("wake.listen_timeout", 5.0)),
+    )
+
+
+def run_voice_mode(config: Config, wake: bool = True, debug: bool = False) -> int:
+    """Wake word (with push-to-talk alongside) or push-to-talk-only voice loop."""
     from core.audio_in import AudioError, HotkeyError, MicRecorder, resolve_device
     from core.sounds import Sounds
+    from core.state import StateManager
     from core.stt import STTError, create_stt
-    from core.voice import VoiceAssistant
+    from core.voice import VoiceAssistant, VoiceSettings, debug_state_printer
 
     try:
         agent = build_agent(config, typed_confirm)  # confirm is re-pointed below
@@ -162,41 +216,53 @@ def run_voice_mode(config: Config) -> int:
         print(f"Microphone error: {exc}", file=sys.stderr)
         return 2
 
-    model = config.get("stt.model", "small.en")
-    print(f"Loading speech recognition ({model}); the first run downloads the model...")
-    try:
-        stt = create_stt(config)
-    except STTError as exc:
-        recorder.close()
-        print(f"Speech recognition error: {exc}", file=sys.stderr)
-        return 2
-    print(f"Speech recognition ready on {stt.device.upper()}.")
-
-    try:
-        out_device = resolve_device(config.get("audio.output_device"), "output")
-    except AudioError:
-        out_device = None
-    sounds = Sounds(out_device, enabled=bool(config.get("audio.beeps", True)))
-
+    pipeline = None
     assistant: VoiceAssistant | None = None
-
-    def tts_error(text: str, exc: Exception) -> None:
-        if assistant is not None:
-            assistant.on_tts_error(text, exc)
-
-    tts = make_tts(config, on_error=tts_error)
-    assistant = VoiceAssistant(
-        agent,
-        recorder,
-        stt,
-        tts,
-        hotkey=str(config.get("hotkey", "f9")),
-        sounds=sounds,
-        min_press_s=float(config.get("audio.min_press_s", 0.3)),
-        hotkey_backend=str(config.get("hotkey_backend", "auto")),
-    )
-    agent.gate.confirm = assistant.confirm
     try:
+        pipeline = _build_pipeline(config, recorder, wake, debug)
+
+        model = config.get("stt.model", "small.en")
+        print(f"Loading speech recognition ({model}); the first run downloads the model...")
+        try:
+            stt = create_stt(config)
+        except STTError as exc:
+            print(f"Speech recognition error: {exc}", file=sys.stderr)
+            return 2
+        print(f"Speech recognition ready on {stt.device.upper()}.")
+
+        try:
+            out_device = resolve_device(config.get("audio.output_device"), "output")
+        except AudioError:
+            out_device = None
+        sounds = Sounds(out_device, enabled=bool(config.get("audio.beeps", True)))
+
+        def tts_error(text: str, exc: Exception) -> None:
+            if assistant is not None:
+                assistant.on_tts_error(text, exc)
+
+        tts = make_tts(config, on_error=tts_error)
+        settings = VoiceSettings(
+            hotkey=str(config.get("hotkey", "f9")) or None,
+            hotkey_backend=str(config.get("hotkey_backend", "auto")),
+            min_press_s=float(config.get("audio.min_press_s", 0.3)),
+            follow_up=bool(config.get("follow_up.enabled", True)),
+            follow_up_window=float(config.get("follow_up.window", 6)),
+            wake_listen_timeout=float(config.get("wake.listen_timeout", 5.0)),
+            headphones=bool(config.get("audio.headphones", False)),
+            echo_tail_s=float(config.get("audio.echo_tail", 0.3)),
+            filler=bool(config.get("tts.filler", True)),
+            filler_delay=float(config.get("tts.filler_delay", 2.5)),
+        )
+        fillers = config.get("tts.fillers")
+        if fillers:
+            settings.fillers = list(fillers)
+        state = StateManager()
+        if debug:
+            state.subscribe(debug_state_printer())
+        assistant = VoiceAssistant(
+            agent, recorder, stt, tts, settings=settings, pipeline=pipeline, state=state, sounds=sounds
+        )
+        agent.gate.confirm = assistant.confirm
         assistant.run()
     except HotkeyError as exc:
         print(f"Hotkey error: {exc}", file=sys.stderr)
@@ -204,7 +270,12 @@ def run_voice_mode(config: Config) -> int:
     except KeyboardInterrupt:
         print("\nGoodbye.")
     finally:
-        assistant.close()
+        if assistant is not None:
+            assistant.close()
+        else:
+            if pipeline is not None:
+                pipeline.stop()
+            recorder.close()
         agent.registry.shutdown()
     return 0
 
@@ -233,13 +304,9 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         return 0
 
-    if args.wake:
-        print("Wake word mode arrives in Phase 3. For now: python main.py --push-to-talk")
-        return 1
-
     try:
         if not args.text:
-            return run_voice_mode(config)
+            return run_voice_mode(config, wake=not args.push_to_talk, debug=args.debug)
 
         try:
             agent = build_agent(config, typed_confirm)

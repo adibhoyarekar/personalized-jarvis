@@ -14,5 +14,9 @@ edge-tts>=7.0.0           # free neural voices (needs internet)
 keyboard>=0.13.5; sys_platform == "win32"   # global push-to-talk hotkey
 pynput>=1.7.7             # hotkey fallback (and default on macOS/Linux)
 
+# Phase 3 - wake word + voice activity detection
+openwakeword>=0.6.0       # "hey jarvis" wake word (models download on first run)
+onnxruntime>=1.16         # runs the wake word and Silero VAD models (VAD model ships with faster-whisper)
+
 # Dev / tests
 pytest>=8.0

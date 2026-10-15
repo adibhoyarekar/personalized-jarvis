@@ -56,9 +56,34 @@ audio:
   sample_rate: 16000        # what speech recognition expects; don't change
   min_press_s: 0.3          # shorter hotkey taps are ignored
   beeps: true               # beep when recording starts/stops
+  headphones: false         # true = voice barge-in while Jarvis talks (see README)
+  echo_tail: 0.3            # speakers: seconds of audio ignored after Jarvis stops talking
 
 hotkey: "f9"                # push-to-talk key: "f9", "right ctrl", "caps lock", ...
 hotkey_backend: auto        # auto | keyboard | pynput (auto = keyboard on Windows)
+
+# --- Wake word, voice detection, conversation (Phase 3) --------------------
+
+wake:
+  model: hey_jarvis         # built-in, or a path to a custom .onnx model
+  threshold: 0.5            # 0-1; raise if it fires by itself, lower if it misses you
+  cooldown: 1.5             # seconds before it can fire again
+  listen_timeout: 5         # seconds to start talking after the wake word
+
+vad:
+  engine: silero            # silero (accurate) | energy (fallback, loudness-based)
+  threshold: 0.5            # speech probability needed per 32 ms window
+  silence_timeout: 1.0      # pause that ends your request; raise if you get cut off
+  max_utterance: 15         # longest request, seconds
+  min_speech: 0.3           # shorter sounds (coughs, clicks) are ignored
+  preroll: 0.5              # audio kept from just before you start talking
+
+follow_up:
+  enabled: true             # keep listening after a reply, no wake word needed
+  window: 6                 # seconds to start a follow-up
+
+barge_in:
+  min_speech: 0.4           # headphones mode: talk this long over Jarvis to interrupt
 
 stt:
   model: small.en           # tiny.en / base.en are faster, medium.en more accurate
@@ -73,6 +98,9 @@ tts:
   voice: en-GB-RyanNeural   # list voices: edge-tts --list-voices
   rate: "+0%"               # speaking speed, e.g. "+15%"
   volume: "+0%"
+  filler: true              # say "One moment." while a slow tool runs
+  filler_delay: 2.5         # seconds of silence before the filler
+  fillers: ["One moment.", "On it.", "Just a second."]
 
 safety:
   confirm_dangerous: true   # ask yes/no before tools marked dangerous=True

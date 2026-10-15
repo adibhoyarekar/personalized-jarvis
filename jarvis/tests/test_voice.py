@@ -14,7 +14,9 @@ import pytest
 
 from core.agent import Reply
 from core.tts import SpeechStream, TTSEngine, decode_audio
-from core.voice import VoiceAssistant
+from core.audio_in import AudioEvent, ListenMode
+from core.state import AssistantState, StateManager
+from core.voice import VoiceAssistant, VoiceSettings
 
 
 class FakeOutputStream:
@@ -123,7 +125,7 @@ def test_decode_mp3_without_ffmpeg() -> None:
     assert rate == 24000 and samples.ndim == 1 and abs(len(samples) - 24000) < 3000
 
 
-# --- push-to-talk loop ---------------------------------------------------------
+# --- voice loop ------------------------------------------------------------------
 
 
 class FakeRecorder:
@@ -155,6 +157,7 @@ class FakeTTS:
         self.spoken: list[str] = []
         self.speaking = False
         self.stops = 0
+        self.on_activity: Any = None
 
     def speak(self, text: str) -> None:
         self.spoken.append(text)
@@ -176,36 +179,70 @@ class FakeTTS:
 class FakeAgent:
     name = "Jarvis"
 
-    def __init__(self) -> None:
+    def __init__(self, reply: str = "CPU is at twelve percent. All quiet.", delay: float = 0.0, tool: bool = False) -> None:
         self.cancelled = threading.Event()
         self.asked: list[str] = []
+        self.reply, self.delay, self.tool = reply, delay, tool
 
     def cancel(self) -> None:
         self.cancelled.set()
 
     def ask(self, text: str, on_text: Any = None, on_status: Any = None) -> Reply:
         self.asked.append(text)
-        on_text("CPU is at twelve percent. All quiet.")
-        return Reply("CPU is at twelve percent. All quiet.")
+        if self.tool and on_status:
+            on_status("tool", "web_search")
+        time.sleep(self.delay)
+        on_text(self.reply)
+        return Reply(self.reply)
 
 
-def make_assistant(texts: list[str]) -> tuple[VoiceAssistant, FakeAgent, FakeTTS, FakeRecorder]:
-    agent, tts, rec = FakeAgent(), FakeTTS(), FakeRecorder()
+class FakePipeline:
+    """Records mode switches; the real AudioPipeline is tested via the endpointer."""
+
+    def __init__(self, wake: bool = True) -> None:
+        self.wake = object() if wake else None
+        self.modes: list[Any] = []
+        self.events: Any = None
+        self.on_barge_in: Any = None
+
+    def set_mode(self, mode: Any, start_timeout: float | None = None, ignore_s: float = 0.0) -> None:
+        self.modes.append(mode)
+
+    def start(self) -> None: ...
+    def stop(self) -> None: ...
+
+
+def make_assistant(
+    texts: list[str], agent: FakeAgent | None = None, pipeline: FakePipeline | None = None, **settings: Any
+) -> tuple[VoiceAssistant, FakeAgent, FakeTTS, FakeRecorder]:
+    agent, tts, rec = agent or FakeAgent(), FakeTTS(), FakeRecorder()
     assistant = VoiceAssistant(
-        agent, rec, FakeSTT(texts), tts, print_fn=lambda *a, **k: None  # type: ignore[arg-type]
+        agent,  # type: ignore[arg-type]
+        rec,  # type: ignore[arg-type]
+        FakeSTT(texts),  # type: ignore[arg-type]
+        tts,  # type: ignore[arg-type]
+        settings=VoiceSettings(**settings),
+        pipeline=pipeline,  # type: ignore[arg-type]
+        state=StateManager(strict=True),
+        print_fn=lambda *a, **k: None,
     )
     return assistant, agent, tts, rec
+
+
+def utterance() -> AudioEvent:
+    return AudioEvent("utterance", np.ones(16000, dtype=np.float32), "vad")
 
 
 def test_press_release_queues_audio_and_short_taps_are_ignored() -> None:
     assistant, _agent, _tts, rec = make_assistant([])
     assistant._on_press()
-    assert rec.recording
+    assert rec.recording and assistant.state.state is AssistantState.LISTENING
     assistant._on_release(0.1)
-    assert assistant.utterances.empty()
+    assert assistant.events.get_nowait().kind == "tap"
     assistant._on_press()
     assistant._on_release(1.2)
-    assert assistant.utterances.qsize() == 1
+    event = assistant.events.get_nowait()
+    assert event.kind == "utterance" and event.detail == "push-to-talk"
 
 
 def test_handle_speaks_reply_sentence_by_sentence() -> None:
@@ -215,7 +252,58 @@ def test_handle_speaks_reply_sentence_by_sentence() -> None:
     assert tts.spoken == ["CPU is at twelve percent.", "All quiet."]
 
 
-def test_barge_in_stops_speech_and_cancels_agent() -> None:
+def test_wake_conversation_goes_to_follow_up_then_idle() -> None:
+    pipeline = FakePipeline()
+    assistant, agent, _tts, _rec = make_assistant(["Hey Jarvis, what's my CPU usage?"], pipeline=pipeline)
+    seen: list[str] = []
+    assistant.state.subscribe(lambda old, new, why: seen.append(new.name))
+
+    assistant.dispatch(AudioEvent("wake"))
+    assistant.dispatch(utterance())
+    assert agent.asked == ["What's my CPU usage?"]  # wake phrase stripped
+    assert assistant.state.state is AssistantState.FOLLOW_UP
+    assert pipeline.modes[-1] is ListenMode.FOLLOW_UP
+
+    assistant.dispatch(AudioEvent("no_speech", detail="follow-up window over"))
+    assert assistant.state.state is AssistantState.IDLE
+    assert pipeline.modes[-1] is ListenMode.WAKE
+    assert seen == ["WAKE_DETECTED", "LISTENING", "THINKING", "FOLLOW_UP", "IDLE"]
+
+
+def test_follow_up_exit_phrase_skips_the_agent() -> None:
+    pipeline = FakePipeline()
+    assistant, agent, tts, _rec = make_assistant(["What time is it?", "Thanks, that's all."], pipeline=pipeline)
+    assistant.dispatch(AudioEvent("wake"))
+    assistant.dispatch(utterance())
+    assert assistant.state.state is AssistantState.FOLLOW_UP
+    assistant.dispatch(utterance())  # no wake word needed in follow-up
+    assert agent.asked == ["What time is it?"]
+    assert tts.spoken[-1] in assistant.settings.exit_replies
+    assert assistant.state.state is AssistantState.IDLE
+
+
+def test_push_to_talk_only_mode_returns_to_idle() -> None:
+    assistant, agent, _tts, _rec = make_assistant(["Open notepad"])
+    assistant._on_press()
+    assistant._on_release(1.0)
+    assistant.dispatch(assistant.events.get_nowait())
+    assert agent.asked == ["Open notepad"]
+    assert assistant.state.state is AssistantState.IDLE  # no pipeline -> no follow-up
+
+
+def test_voice_barge_in_stops_speech_and_cancels_agent() -> None:
+    pipeline = FakePipeline()
+    assistant, agent, tts, _rec = make_assistant([], pipeline=pipeline)
+    assistant.state.set(AssistantState.THINKING)
+    assistant.state.set(AssistantState.SPEAKING)
+    tts.speaking = True
+    assistant._busy.set()
+    pipeline.on_barge_in("voice")
+    assert tts.stops == 1 and agent.cancelled.is_set()
+    assert assistant.state.state is AssistantState.LISTENING
+
+
+def test_hotkey_barge_in_stops_speech_and_cancels_agent() -> None:
     assistant, agent, tts, rec = make_assistant([])
     tts.speaking = True
     assistant._busy.set()
@@ -223,21 +311,48 @@ def test_barge_in_stops_speech_and_cancels_agent() -> None:
     assert tts.stops == 1 and agent.cancelled.is_set() and rec.recording
 
 
+def test_tts_activity_drives_speaking_state() -> None:
+    assistant, _agent, _tts, _rec = make_assistant([])
+    assistant.state.set(AssistantState.THINKING)
+    assistant._busy.set()
+    assistant._on_tts_activity(True)
+    assert assistant.state.state is AssistantState.SPEAKING
+    assistant._on_tts_activity(False)  # a tool is still running
+    assert assistant.state.state is AssistantState.THINKING
+
+
+def test_filler_spoken_when_tool_is_slow() -> None:
+    slow = FakeAgent(reply="Found it.", delay=0.3, tool=True)
+    assistant, _agent, tts, _rec = make_assistant([], agent=slow, filler_delay=0.1)
+    assistant.handle("search the web")
+    assert tts.spoken[0] in assistant.settings.fillers and tts.spoken[-1] == "Found it."
+
+
+def test_no_filler_when_reply_is_fast_or_no_tool() -> None:
+    assistant, _agent, tts, _rec = make_assistant([], agent=FakeAgent(reply="Hi.", delay=0.2), filler_delay=0.05)
+    assistant.handle("hello")
+    assert tts.spoken == ["Hi."]
+    assistant2, _a, tts2, _r = make_assistant([], agent=FakeAgent(reply="Quick.", tool=True), filler_delay=0.5)
+    assistant2.handle("quick tool")
+    time.sleep(0.6)
+    assert tts2.spoken == ["Quick."]
+
+
 def test_spoken_confirmation() -> None:
     assistant, agent, tts, _rec = make_assistant(["Yes, go ahead."])
     assistant._busy.set()  # the agent is mid-reply while it asks
-    assistant.utterances.put(np.ones(16000, dtype=np.float32))  # stale audio: discarded
+    assistant.events.put(utterance())  # stale audio: discarded
 
     def answer() -> None:  # the user holds the hotkey and answers
         assistant._on_press()
         assistant._on_release(1.0)
 
     threading.Timer(0.05, answer).start()
-    assert assistant.confirm("Should I close Chrome?", timeout_s=2)
+    assert assistant.confirm("Should I close Chrome?")
     assert tts.spoken[0] == "Should I close Chrome?"
     assert not agent.cancelled.is_set()  # answering must not cancel the agent
 
 
 def test_confirmation_times_out_as_no() -> None:
-    assistant, _agent, _tts, _rec = make_assistant([])
-    assert not assistant.confirm("Should I shut down?", timeout_s=0.05)
+    assistant, _agent, _tts, _rec = make_assistant([], confirm_timeout=0.05)
+    assert not assistant.confirm("Should I shut down?")
