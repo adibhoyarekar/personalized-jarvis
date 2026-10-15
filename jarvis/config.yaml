@@ -1,0 +1,59 @@
+# Jarvis configuration. Secrets (ANTHROPIC_API_KEY) live in .env, not here.
+# Paths may use ~ and %ENV_VARS% / $ENV_VARS. Relative paths are resolved
+# against this file's folder.
+
+assistant:
+  name: Jarvis
+  user_name: ""            # how Jarvis addresses you, e.g. "Aditya" (empty = "sir")
+
+llm:
+  model: claude-sonnet-5-5
+  max_tokens: 16000         # cap on thinking + reply per request
+  effort: low               # low | medium | high - low keeps voice replies snappy
+  max_history_turns: 10     # user/assistant exchanges kept as context
+  max_tool_rounds: 8        # tool-call round trips allowed per request
+  request_timeout_s: 60
+  max_retries: 2
+  refusal_fallback: true    # let the API retry a declined request on a fallback model
+
+tools:
+  timeout_s: 30             # per tool call
+  disabled: []              # tool names to hide from the model, e.g. [web_search]
+  disabled_modules: []      # whole modules, e.g. [media_tools]
+
+  # Friendly names -> command/executable for open_app. Anything not listed is
+  # resolved through PATH and the Windows "App Paths" registry (like Win+R).
+  apps:
+    notepad: notepad.exe
+    calculator: calc.exe
+    explorer: explorer.exe
+    file explorer: explorer.exe
+    task manager: taskmgr.exe
+    paint: mspaint.exe
+    chrome: chrome
+    edge: msedge
+    firefox: firefox
+    vs code: code
+    vscode: code
+    terminal: wt
+    spotify: spotify
+
+  # Named folders for list_folder / file tools ("desktop", "downloads", ...).
+  folders:
+    home: "~"
+    desktop: "~/Desktop"
+    documents: "~/Documents"
+    downloads: "~/Downloads"
+    pictures: "~/Pictures"
+    music: "~/Music"
+    videos: "~/Videos"
+
+safety:
+  confirm_dangerous: true   # ask yes/no before tools marked dangerous=True
+
+paths:
+  logs_dir: logs
+  data_dir: data
+
+logging:
+  level: INFO               # DEBUG for troubleshooting

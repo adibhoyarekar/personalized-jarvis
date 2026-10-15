@@ -1,0 +1,9 @@
+# Phase 1 - core (text mode)
+anthropic>=1.14.0
+python-dotenv>=1.0
+PyYAML>=6.0
+psutil>=5.9
+ddgs>=9.0            # DuckDuckGo search (successor of duckduckgo-search)
+
+# Dev / tests
+pytest>=8.0
