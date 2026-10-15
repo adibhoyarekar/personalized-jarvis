@@ -1,10 +1,12 @@
 """Jarvis entry point.
 
 Usage:
+    python main.py                   # same as --push-to-talk
+    python main.py --push-to-talk    # hold the hotkey (F9), speak, release
     python main.py --text            # type to Jarvis, read replies (debug mode)
-    python main.py --push-to-talk    # hold-to-talk voice mode        (Phase 2)
-    python main.py --wake            # say "Jarvis" hands-free         (Phase 3)
-    python main.py --list-devices    # show audio devices              (Phase 2)
+    python main.py --text --speak    # type, and hear the replies
+    python main.py --wake            # say "Jarvis" hands-free        (Phase 3)
+    python main.py --list-devices    # show audio devices and their indexes
 """
 
 from __future__ import annotations
@@ -15,9 +17,10 @@ import sys
 from pathlib import Path
 
 from core.agent import Agent, AgentError
-from core.config import ConfigError, load_config
+from core.config import Config, ConfigError, load_config
 from core.logging_setup import setup_logging
 from core.safety import SafetyGate, parse_yes_no
+from core.tts import SpeechStream, TTSEngine
 from tools import ToolContext, ToolRegistry, set_context
 
 log = logging.getLogger("jarvis")
@@ -30,6 +33,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     mode.add_argument("--push-to-talk", action="store_true", help="voice mode, hold a hotkey to talk")
     mode.add_argument("--wake", action="store_true", help="voice mode, wake word activation")
     mode.add_argument("--list-devices", action="store_true", help="list audio input/output devices")
+    parser.add_argument("--speak", action="store_true", help="with --text: also speak replies")
     parser.add_argument("--config", type=Path, default=None, help="path to config.yaml")
     parser.add_argument("--debug", action="store_true", help="verbose logging (logs/jarvis.log)")
     return parser.parse_args(argv)
@@ -69,16 +73,18 @@ def build_agent(config, confirm) -> Agent:  # type: ignore[no-untyped-def]
 HELP = """Commands: /tools  list tools   /reset  forget conversation   /quit  exit"""
 
 
-def run_text_mode(agent: Agent) -> None:
+def run_text_mode(agent: Agent, tts: TTSEngine | None = None) -> None:
     """Interactive terminal chat: the debugging front-end for the agent."""
     name = agent.name
-    print(f"{name} text mode. {HELP}\n")
+    print(f"{name} text mode{' (speaking)' if tts else ''}. {HELP}\n")
     while True:
         try:
             user_text = input("You > ").strip()
         except (EOFError, KeyboardInterrupt):
             print()
             break
+        if tts is not None:
+            tts.stop()  # typing something new interrupts the previous reply
         if not user_text:
             continue
         cmd = user_text.lower()
@@ -104,13 +110,103 @@ def run_text_mode(agent: Agent) -> None:
             if state == "tool":
                 print(f"[{detail}] ", end="", flush=True)
 
+        stream = SpeechStream(tts)
+
+        def on_text(chunk: str) -> None:
+            print(chunk, end="", flush=True)
+            stream.feed(chunk)
+
         try:
-            agent.ask(user_text, on_text=lambda t: print(t, end="", flush=True), on_status=show_status)
+            agent.ask(user_text, on_text=on_text, on_status=show_status)
+            stream.finish()
         except KeyboardInterrupt:
             agent.cancel()
+            if tts is not None:
+                tts.stop()
             print(" (interrupted)")
         print("\n")
     print("Goodbye.")
+
+
+def make_tts(config: Config, on_error=None) -> TTSEngine | None:  # type: ignore[no-untyped-def]
+    """Create the configured TTS engine, or None (print-only) if it can't start."""
+    from core.audio_in import AudioError, resolve_device
+    from core.tts import TTSError, create_tts
+
+    try:
+        device = resolve_device(config.get("audio.output_device"), "output")
+        return create_tts(config, output_device=device, on_error=on_error)
+    except (AudioError, TTSError, NotImplementedError) as exc:
+        print(f"Speech output disabled: {exc}\nReplies will be printed only.\n")
+        log.warning("TTS unavailable: %s", exc)
+        return None
+
+
+def run_voice_mode(config: Config) -> int:
+    """Push-to-talk voice loop. Returns a process exit code."""
+    from core.audio_in import AudioError, HotkeyError, MicRecorder, resolve_device
+    from core.sounds import Sounds
+    from core.stt import STTError, create_stt
+    from core.voice import VoiceAssistant
+
+    try:
+        agent = build_agent(config, typed_confirm)  # confirm is re-pointed below
+    except AgentError as exc:
+        print(f"Startup error: {exc}", file=sys.stderr)
+        return 2
+
+    try:
+        recorder = MicRecorder(config.get("audio.input_device"), int(config.get("audio.sample_rate", 16000)))
+        recorder.open()
+    except AudioError as exc:
+        print(f"Microphone error: {exc}", file=sys.stderr)
+        return 2
+
+    model = config.get("stt.model", "small.en")
+    print(f"Loading speech recognition ({model}); the first run downloads the model...")
+    try:
+        stt = create_stt(config)
+    except STTError as exc:
+        recorder.close()
+        print(f"Speech recognition error: {exc}", file=sys.stderr)
+        return 2
+    print(f"Speech recognition ready on {stt.device.upper()}.")
+
+    try:
+        out_device = resolve_device(config.get("audio.output_device"), "output")
+    except AudioError:
+        out_device = None
+    sounds = Sounds(out_device, enabled=bool(config.get("audio.beeps", True)))
+
+    assistant: VoiceAssistant | None = None
+
+    def tts_error(text: str, exc: Exception) -> None:
+        if assistant is not None:
+            assistant.on_tts_error(text, exc)
+
+    tts = make_tts(config, on_error=tts_error)
+    assistant = VoiceAssistant(
+        agent,
+        recorder,
+        stt,
+        tts,
+        hotkey=str(config.get("hotkey", "f9")),
+        sounds=sounds,
+        min_press_s=float(config.get("audio.min_press_s", 0.3)),
+        hotkey_backend=str(config.get("hotkey_backend", "auto")),
+    )
+    agent.gate.confirm = assistant.confirm
+    try:
+        assistant.run()
+    except HotkeyError as exc:
+        print(f"Hotkey error: {exc}", file=sys.stderr)
+        return 2
+    except KeyboardInterrupt:
+        print("\nGoodbye.")
+    finally:
+        assistant.close()
+        agent.registry.shutdown()
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -127,22 +223,39 @@ def main(argv: list[str] | None = None) -> int:
     log_file = setup_logging(config.path("paths.logs_dir", "logs"), level, console=args.debug)
     log.info("Starting Jarvis (args=%s)", vars(args))
 
-    if args.list_devices or args.push_to_talk or args.wake:
-        print("Voice features arrive in Phase 2/3. For now run: python main.py --text")
+    if args.list_devices:
+        from core.audio_in import AudioError, list_devices
+
+        try:
+            print(list_devices())
+        except AudioError as exc:
+            print(f"Audio error: {exc}", file=sys.stderr)
+            return 2
+        return 0
+
+    if args.wake:
+        print("Wake word mode arrives in Phase 3. For now: python main.py --push-to-talk")
         return 1
 
     try:
-        agent = build_agent(config, typed_confirm)
-    except AgentError as exc:
-        print(f"Startup error: {exc}", file=sys.stderr)
-        return 2
+        if not args.text:
+            return run_voice_mode(config)
 
-    try:
-        run_text_mode(agent)
+        try:
+            agent = build_agent(config, typed_confirm)
+        except AgentError as exc:
+            print(f"Startup error: {exc}", file=sys.stderr)
+            return 2
+        tts = make_tts(config) if args.speak else None
+        try:
+            run_text_mode(agent, tts)
+        finally:
+            if tts is not None:
+                tts.shutdown()
+            agent.registry.shutdown()
+        return 0
     finally:
-        agent.registry.shutdown()
         log.info("Jarvis stopped. Log: %s", log_file)
-    return 0
 
 
 if __name__ == "__main__":

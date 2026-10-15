@@ -48,6 +48,32 @@ tools:
     music: "~/Music"
     videos: "~/Videos"
 
+# --- Voice (Phase 2) -------------------------------------------------------
+
+audio:
+  input_device: null        # null = Windows default mic; or an index / part of the
+  output_device: null       # name from `python main.py --list-devices`
+  sample_rate: 16000        # what speech recognition expects; don't change
+  min_press_s: 0.3          # shorter hotkey taps are ignored
+  beeps: true               # beep when recording starts/stops
+
+hotkey: "f9"                # push-to-talk key: "f9", "right ctrl", "caps lock", ...
+hotkey_backend: auto        # auto | keyboard | pynput (auto = keyboard on Windows)
+
+stt:
+  model: small.en           # tiny.en / base.en are faster, medium.en more accurate
+  device: auto              # auto (GPU if CUDA works, else CPU) | cuda | cpu
+  compute_type: auto        # auto = float16 on GPU, int8 on CPU
+  beam_size: 1              # 1 = fastest; 5 = slightly more accurate
+  download_root: null       # model cache folder (null = Hugging Face default)
+  min_rms: 0.004            # audio quieter than this is treated as silence
+
+tts:
+  engine: edge              # edge | piper (coming later) | elevenlabs (coming later)
+  voice: en-GB-RyanNeural   # list voices: edge-tts --list-voices
+  rate: "+0%"               # speaking speed, e.g. "+15%"
+  volume: "+0%"
+
 safety:
   confirm_dangerous: true   # ask yes/no before tools marked dangerous=True
 

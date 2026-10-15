@@ -3,7 +3,16 @@ anthropic>=1.14.0
 python-dotenv>=1.0
 PyYAML>=6.0
 psutil>=5.9
-ddgs>=9.0            # DuckDuckGo search (successor of duckduckgo-search)
+ddgs>=9.0                 # DuckDuckGo search (successor of duckduckgo-search)
+
+# Phase 2 - voice (push-to-talk, speech in/out)
+numpy>=1.26
+sounddevice>=0.4.6        # mic + speaker (bundles PortAudio on Windows)
+soundfile>=0.12.1         # decodes edge-tts MP3 without ffmpeg (libsndfile >= 1.1)
+faster-whisper>=1.1.0     # local speech-to-text
+edge-tts>=7.0.0           # free neural voices (needs internet)
+keyboard>=0.13.5; sys_platform == "win32"   # global push-to-talk hotkey
+pynput>=1.7.7             # hotkey fallback (and default on macOS/Linux)
 
 # Dev / tests
 pytest>=8.0

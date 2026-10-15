@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import threading
 import time
 from pathlib import Path
@@ -20,8 +21,11 @@ def parse_yes_no(answer: str | None) -> bool:
     """Interpret a typed or spoken answer. Anything not clearly "yes" counts as no."""
     if not answer:
         return False
-    text = answer.strip().lower().rstrip(".!?")
-    return text in _YES or text.startswith(("yes ", "yeah ", "sure ", "go ahead"))
+    text = re.sub(r"[^\w\s]", " ", answer.lower())
+    text = re.sub(r"\s+", " ", text).strip()
+    if re.search(r"\b(no|nope|not|don ?t|cancel|stop)\b", text):
+        return False
+    return text in _YES or text.startswith(("yes ", "yeah ", "yep ", "sure ", "go ahead", "do it"))
 
 
 def describe_call(name: str, args: dict[str, Any]) -> str:
