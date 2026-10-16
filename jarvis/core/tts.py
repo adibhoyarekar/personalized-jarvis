@@ -313,14 +313,23 @@ class EdgeTTSEngine(TTSEngine):
 
         communicate = edge_tts.Communicate(text, self.voice, rate=self.rate, volume=self.volume)
         audio = bytearray()
+        cancelled = False
+        # Use break instead of raise so the async generator closes cleanly (Python 3.14+).
         async for chunk in communicate.stream():
             if self.synthesis_cancelled():
-                raise SynthesisCancelled
+                cancelled = True
+                break
             if chunk.get("type") == "audio":
                 audio.extend(chunk["data"])
+        if cancelled:
+            raise SynthesisCancelled
         return bytes(audio)
 
     def synthesize(self, text: str) -> tuple[np.ndarray, int]:
+        # When called directly (e.g. --check), _synth_gen was never set by the thread loop;
+        # sync it here so synthesis_cancelled() doesn't fire immediately.
+        if self._synth_gen != self._generation:
+            self._synth_gen = self._generation
         if self._loop is None:  # one event loop, owned by the synth thread
             self._loop = asyncio.new_event_loop()
         try:
