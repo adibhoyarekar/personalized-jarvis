@@ -136,11 +136,13 @@ class VoiceAssistant:
         self._stop = threading.Event()             # stop() ends run()
         self._muted = threading.Event()            # mic off: no wake word, no push-to-talk
         self._wake_active = True                   # False = push-to-talk only (switchable)
-        #: Observers for the tray/overlay: called with what the user said,
-        #: with each streamed reply chunk, and when a reply is complete.
+        #: Observers for the tray/overlay/window: called with what the user said,
+        #: with each streamed reply chunk, when a reply is complete, and with
+        #: anything Jarvis says outside a reply (questions, reminders, errors).
         self.transcript_listeners: list[Callable[[str], None]] = []
         self.reply_listeners: list[Callable[[str], None]] = []
         self.reply_done_listeners: list[Callable[[], None]] = []
+        self.notice_listeners: list[Callable[[str], None]] = []
         self.ptt: PushToTalk | None = None
         if self.settings.hotkey:
             self.ptt = PushToTalk(
@@ -183,6 +185,15 @@ class VoiceAssistant:
             self._muted.clear()
             log.info("Microphone unmuted")
         self.events.put(AudioEvent("mute_changed"))
+
+    def submit_text(self, text: str) -> None:
+        """Answer a typed message as if it had been spoken (from any thread, e.g. the window)."""
+        text = text.strip()
+        if not text:
+            return
+        if not self._awaiting_answer.is_set():  # a typed yes/no answers the open question instead
+            self._interrupt("typed message")
+        self.events.put(AudioEvent("text", None, text))
 
     def set_wake_active(self, active: bool) -> bool:
         """Switch between wake word and push-to-talk-only. Returns False if no wake model is loaded."""
@@ -325,6 +336,9 @@ class VoiceAssistant:
                 self._go_idle(event.detail or "nothing heard")
         elif event.kind == "utterance":
             self.process(event)
+        elif event.kind == "text":
+            self._notify(self.transcript_listeners, event.detail)
+            self.respond(event.detail)
 
     def process(self, event: AudioEvent) -> None:
         """Transcribe one utterance, answer it, then go to follow-up or idle."""
@@ -447,12 +461,14 @@ class VoiceAssistant:
     def say(self, text: str) -> None:
         """Print and speak a short message."""
         self.print(f"{self.agent.name}: {text}")
+        self._notify(self.notice_listeners, text)
         if self.tts is not None:
             self.tts.speak(text)
 
     def announce(self, message: str) -> None:
         """Say something unprompted (timers, reminders). Safe to call from any thread."""
         self.print(f"\n[{self.agent.name}] {message}")
+        self._notify(self.notice_listeners, message)
         self.sounds.chime()
         if self.tts is not None:
             self.tts.speak(message)
@@ -506,7 +522,13 @@ class VoiceAssistant:
             except queue.Empty:
                 break
             if event.kind == "utterance" and event.audio is not None:
-                return self._transcribe(event.audio, quiet=True)
+                text = self._transcribe(event.audio, quiet=True)
+                if text:
+                    self._notify(self.transcript_listeners, text)
+                return text
+            if event.kind == "text":
+                self._notify(self.transcript_listeners, event.detail)
+                return event.detail
             if event.kind == "no_speech":
                 return None
         return None

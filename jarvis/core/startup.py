@@ -1,6 +1,6 @@
 """Run-at-login registration for Windows: a Task Scheduler task, with a registry Run-key fallback.
 
-The task starts ``pythonw.exe main.py --wake --tray`` (no console window),
+The task starts ``pythonw.exe main.py --wake --tray --minimized`` (no console window, window hidden in the tray),
 30 seconds after you log in so audio devices are ready, from the project folder.
 """
 
@@ -21,7 +21,8 @@ log = logging.getLogger(__name__)
 TASK_NAME = "Jarvis Assistant"
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 RUN_VALUE = "JarvisAssistant"
-DEFAULT_ARGS = ["--wake", "--tray"]
+DEFAULT_ARGS = ["--wake", "--tray", "--minimized"]  # at login: straight to the tray
+SHORTCUT_ARGS = ["--wake", "--tray"]  # double-click: open the window
 
 
 def find_pythonw(project_dir: Path = PROJECT_DIR) -> Path:
@@ -146,7 +147,7 @@ def shortcut_script(pythonw: Path, main_py: Path, workdir: Path, args: list[str]
 
     The Desktop folder comes from Windows itself so OneDrive-redirected desktops work.
     """
-    arguments = " ".join([f'"{main_py}"', *(args or DEFAULT_ARGS)])
+    arguments = " ".join([f'"{main_py}"', *(args or SHORTCUT_ARGS)])
     return "; ".join([
         "$desktop = [Environment]::GetFolderPath('Desktop')",
         f"$link = Join-Path $desktop {_ps_quote(SHORTCUT_NAME)}",

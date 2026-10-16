@@ -196,6 +196,8 @@ class VoiceApp:
         debug: Print state changes and wake word scores.
         tray: Show the system tray icon.
         overlay: Show the on-screen overlay (None = use ``ui.overlay`` from config).
+        window: Show the desktop window (None = use ``ui.window`` from config).
+        start_hidden: Start with the window hidden in the tray (ignored without a tray).
         argv: Command line to reuse when restarting.
         print_fn: Console output (pythonw has no console; print then does nothing).
     """
@@ -207,6 +209,8 @@ class VoiceApp:
         debug: bool = False,
         tray: bool = False,
         overlay: bool | None = None,
+        window: bool | None = None,
+        start_hidden: bool = False,
         argv: list[str] | None = None,
         print_fn: Callable[..., None] = print,
     ) -> None:
@@ -215,6 +219,8 @@ class VoiceApp:
         self.debug = debug
         self.use_tray = tray
         self.use_overlay = bool(config.get("ui.overlay", False)) if overlay is None else overlay
+        self.use_window = bool(config.get("ui.window", True)) if window is None else window
+        self.start_hidden = start_hidden
         self.argv = argv if argv is not None else sys.argv[1:]
         self.print = print_fn
         self.state = StateManager()
@@ -222,6 +228,10 @@ class VoiceApp:
         self.assistant: Any = None
         self.tray: Any = None
         self.overlay: Any = None
+        self.window: Any = None
+        self.show_requests: Any = None
+        self._hidden_notice_given = False
+        self._mic_rms = 0.0
         self.monitor: ConnectivityMonitor | None = None
         self.muted = False
         self._quit = threading.Event()
@@ -274,6 +284,7 @@ class VoiceApp:
 
     def restart(self) -> None:
         self._restart_process = True
+        self.argv = [a for a in self.argv if a != "--minimized"]  # come back on screen
         self.quit()
 
     def quit(self) -> None:
@@ -281,21 +292,65 @@ class VoiceApp:
         if self.assistant is not None:
             self.assistant.stop()
 
+    def has_window(self) -> bool:
+        return self.use_window
+
+    def show_window(self) -> None:
+        if self.window is not None:
+            self.window.show()
+
+    # -- WindowActions ------------------------------------------------------------------
+
+    def submit_text(self, text: str) -> None:
+        """A message typed in the window."""
+        if self.assistant is not None:
+            self.assistant.submit_text(text)
+        elif self.window is not None:
+            self.window.on_transcript(text)
+            self.window.on_notice("I'm still starting up. Give me a few seconds and try again.")
+
+    def window_closed(self) -> None:
+        """The window's X: hide to the tray if there is one, otherwise quit."""
+        if self.tray is None:
+            self.quit()
+            return
+        if self.window is not None:
+            self.window.hide()
+        if not self._hidden_notice_given:
+            self._hidden_notice_given = True
+            name = self.config.get("assistant.name", "Jarvis")
+            self.tray.notify(f"{name} is still running here. Right-click the icon and choose Quit to exit.")
+
+    def _set_status_note(self, note: str) -> None:
+        for ui in (self.tray, self.window):
+            if ui is not None:
+                ui.set_status_note(note)
+
+    def _set_error(self, error: bool) -> None:
+        for ui in (self.tray, self.window):
+            if ui is not None:
+                ui.set_error(error)
+
+    def _on_mic_frame(self, frame: Any) -> None:
+        """Mic callback thread: keep the latest loudness for the window's animation."""
+        self._mic_rms = float((frame * frame).mean()) ** 0.5 if frame.size else 0.0
+
     # -- notifications ----------------------------------------------------------------
 
     def notify(self, message: str, speak: bool = True) -> None:
         """Toast + console, and speech when a voice session is running."""
         show_toast("Jarvis", message, sound=False)
         if speak and self.assistant is not None:
-            self.assistant.announce(message)  # prints too
+            self.assistant.announce(message)  # prints too, and reaches the window
         else:
             self.print(f"[{self.config.get('assistant.name', 'Jarvis')}] {message}")
+            if self.window is not None:
+                self.window.on_notice(message)
 
     def _on_offline(self) -> None:
         if self.runtime is not None:
             self.runtime.agent.online = False
-        if self.tray is not None:
-            self.tray.set_status_note("offline")
+        self._set_status_note("offline")
         message = ("I can't reach the internet, so I'm in offline mode. Timers, volume, music and apps "
                    "still work, and I'll keep trying to reconnect.")
         if self.assistant is None:
@@ -307,8 +362,7 @@ class VoiceApp:
     def _on_online(self) -> None:
         if self.runtime is not None:
             self.runtime.agent.online = True
-        if self.tray is not None:
-            self.tray.set_status_note("")
+        self._set_status_note("")
         if self.assistant is not None:
             self.notify("I'm back online.")
 
@@ -327,8 +381,14 @@ class VoiceApp:
 
             self.state.subscribe(debug_state_printer(self.print))
         try:
+            if self.use_window or self.use_tray:
+                from ui.window import prepare_windows_process
+
+                prepare_windows_process()  # before the first window, tray included
             if self.use_tray:
                 self._start_tray()
+            if self.use_window:
+                self._start_window()
             try:
                 self.runtime = build_runtime(self.config)  # confirm/notify are re-pointed per session
             except AgentError as exc:
@@ -349,11 +409,12 @@ class VoiceApp:
                 self.recorder.open()
             except AudioError as exc:
                 return self._fatal(f"Microphone error: {exc}")
+            if self.window is not None:
+                self.recorder.add_listener(self._on_mic_frame)
 
             model = self.config.get("stt.model", "small.en")
             self.print(f"Loading speech recognition ({model}); the first run downloads the model...")
-            if self.tray is not None:
-                self.tray.set_status_note("loading")
+            self._set_status_note("loading")
             try:
                 self.stt = create_stt(self.config)
             except STTError as exc:
@@ -364,8 +425,7 @@ class VoiceApp:
             self.tts = make_tts(self.config, on_error=self._tts_error)
             if self.use_overlay:
                 self._start_overlay()
-            if self.tray is not None:
-                self.tray.set_status_note("" if agent.online else "offline")
+            self._set_status_note("" if agent.online else "offline")
 
             supervisor = Supervisor(
                 self._session_loop,
@@ -420,13 +480,17 @@ class VoiceApp:
         if self.overlay is not None:
             assistant.transcript_listeners.append(self.overlay.on_transcript)
             assistant.reply_listeners.append(self.overlay.on_reply)
+        if self.window is not None:
+            assistant.transcript_listeners.append(self.window.on_transcript)
+            assistant.reply_listeners.append(self.window.on_reply)
+            assistant.reply_done_listeners.append(self.window.on_reply_done)
+            assistant.notice_listeners.append(self.window.on_notice)
         if self.muted:
             assistant.set_muted(True)
         self.runtime.agent.gate.confirm = assistant.confirm
         self.runtime.set_notify(assistant.announce)
         self.assistant = assistant
-        if self.tray is not None:
-            self.tray.set_error(False)
+        self._set_error(False)
         on_ready = self._on_ready if self._first_session else None
         self._first_session = False
         try:
@@ -445,6 +509,8 @@ class VoiceApp:
         if greeting and self.tts is not None:
             self.tts.speak(greeting)
             self.print(f"{self.runtime.agent.name if self.runtime else 'Jarvis'}: {greeting}")
+        if greeting and self.window is not None:
+            self.window.on_notice(greeting)
         if self._offline_notice_pending:
             self._offline_notice_pending = False
             self.notify("I'm offline right now, so only simple local commands work. I'll keep trying.")
@@ -482,6 +548,27 @@ class VoiceApp:
             self.print(f"(tray icon unavailable: {exc})")
             self.tray = None
 
+    def _start_window(self) -> None:
+        try:
+            from core.single_instance import ShowRequests
+            from ui.window import JarvisWindow
+
+            self.window = JarvisWindow(
+                self,
+                name=str(self.config.get("assistant.name", "Jarvis")),
+                hotkey=str(self.config.get("hotkey", "f9") or ""),
+                start_hidden=self.start_hidden and self.tray is not None,
+                level=lambda: self._mic_rms,
+            )
+            self.state.subscribe(self.window.on_state)
+            self.window.start()
+            # A second launch (desktop shortcut) brings this window forward instead.
+            self.show_requests = ShowRequests(self.window.show)
+            self.show_requests.start()
+        except Exception as exc:  # noqa: BLE001 - Jarvis works without its window
+            log.warning("Window unavailable: %s", exc)
+            self.window = None
+
     def _start_overlay(self) -> None:
         try:
             from ui.overlay import Overlay
@@ -497,13 +584,11 @@ class VoiceApp:
             self.overlay = None
 
     def _on_crash(self, exc: BaseException) -> None:
-        if self.tray is not None:
-            self.tray.set_error(True)
+        self._set_error(True)
         self.print(f"\n[error] {type(exc).__name__}: {exc} - restarting in 3 seconds (details in logs/jarvis.log)")
 
     def _on_give_up(self, exc: BaseException) -> None:
-        if self.tray is not None:
-            self.tray.set_error(True)
+        self._set_error(True)
         message = "Jarvis stopped after crashing repeatedly. Check logs/jarvis.log, then restart from the tray."
         self.print(message)
         show_toast("Jarvis stopped", message)
@@ -524,6 +609,8 @@ class VoiceApp:
     def _shutdown(self) -> None:
         for name, stop in (
             ("connectivity", lambda: self.monitor and self.monitor.stop()),
+            ("show requests", lambda: self.show_requests and self.show_requests.stop()),
+            ("window", lambda: self.window and self.window.stop()),
             ("overlay", lambda: self.overlay and self.overlay.stop()),
             ("tts", lambda: self.tts and self.tts.shutdown()),
             ("microphone", lambda: self.recorder and self.recorder.close()),

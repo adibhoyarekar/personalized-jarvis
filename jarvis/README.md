@@ -27,9 +27,10 @@ Windows, and recovers from crashes on its own.
   folders you choose. Every tool call is logged.
 - **Memory:** it remembers facts and preferences, keeps your last 200 commands,
   and stores reminders that survive restarts.
-- **Desktop integration:** a tray icon that changes colour with the state, an
-  optional on-screen overlay, run-at-login, a single instance, automatic
-  crash recovery, and an offline mode for simple commands.
+- **Desktop integration:** a dark desktop window with an animated orb and the
+  live conversation (closing it hides Jarvis to the tray), a tray icon that
+  changes colour with the state, an optional on-screen overlay, run-at-login,
+  a single instance, automatic crash recovery, and an offline mode for simple commands.
 - **Easy to extend:** a new tool is one function plus `@tool`.
 
 ## Requirements
@@ -87,6 +88,8 @@ result is validated before it's kept.
 | `--push-to-talk` | Hold F9 to talk; no wake word |
 | `--text` | Type instead of talk (great for debugging); `--speak` also reads replies aloud |
 | `--tray` / `--no-tray` | Show/hide the tray icon (on by default under `pythonw`) |
+| `--window` / `--no-window` | Show/hide the desktop window (on by default; or set `ui.window`) |
+| `--minimized` | Start with the window hidden in the tray (used at login) |
 | `--overlay` | Show the on-screen overlay (or set `ui.overlay: true`) |
 | `--setup` | First-run wizard |
 | `--check` | PASS/FAIL table: API key, Claude reachable, mic, speakers, models, TTS, hotkey, folders, projects |
@@ -135,6 +138,23 @@ speakers, so interrupting by voice needs headphones.
 | Interrupt with F9 | Yes | Yes |
 | Risk of Jarvis hearing itself | None (the first 0.3 s after it stops is ignored too) | High if you're really on speakers |
 
+### Desktop window
+
+Voice mode opens a dark window with an animated orb that shows what Jarvis is
+doing: cyan on standby, green while listening (it moves with your voice), violet
+while thinking, blue while speaking, red when the mic is off. Under it is the
+conversation, and at the bottom a box to type a message (Enter sends it, and it
+interrupts a reply like F9 does) plus a mic button to turn the microphone off.
+
+- **X (close)** hides the window; Jarvis keeps running in the tray. Click the
+  tray icon (or "Open Jarvis" in its menu) to bring the window back.
+- **Quit** in the tray menu exits Jarvis completely.
+- Launching Jarvis again (e.g. the desktop shortcut) brings the running
+  window forward instead of starting a second copy.
+- Without a tray icon (`--no-tray`), closing the window quits.
+
+Turn it off with `ui.window: false` or `--no-window`.
+
 ### Overlay
 
 With `ui.overlay: true`, a small dark box in a corner of the screen shows the
@@ -153,13 +173,14 @@ python scripts\uninstall_startup.py               # stop starting at login
 
 Use the same Python you installed the requirements with (`.venv\Scripts\python`
 if you made a virtual environment). This creates a hidden Task Scheduler task named
-**"Jarvis Assistant"**. It runs `pythonw.exe main.py --wake --tray` 30 seconds after you
-log in (so audio devices are ready), with no console window. If Task
+**"Jarvis Assistant"**. It runs `pythonw.exe main.py --wake --tray --minimized` 30 seconds
+after you log in (so audio devices are ready): no console window, and the window
+starts hidden in the tray. The desktop shortcut opens the window. If Task
 Scheduler isn't available, a registry Run key (`HKCU\...\Run\JarvisAssistant`)
 is used instead. `scripts\run_jarvis.bat` starts the same thing by hand.
 
-Only one Jarvis runs at a time. Starting a second one shows "Jarvis is
-already running" and exits. On launch you hear a chime and "Good morning,
+Only one Jarvis runs at a time. Starting a second one brings the running
+window forward (or, with no window, says "Jarvis is already running") and exits. On launch you hear a chime and "Good morning,
 <name>. Jarvis online." (`startup.*`). Set `startup.auto_briefing: true` to
 also get the daily briefing on the first launch of each day.
 
@@ -308,7 +329,7 @@ Secrets live in `.env` (`ANTHROPIC_API_KEY=...` or `GEMINI_API_KEY=...`); everyt
 | `barge_in.min_speech` | Talk this long over Jarvis to interrupt (headphones mode) |
 | `stt` | `model` (`small.en`), `device`, `compute_type`, `beam_size`, `download_root`, `min_rms` |
 | `tts` | `engine` (`edge`), `voice`, `rate`, `volume`, `filler`, `filler_delay`, `fillers` |
-| `ui` | `tray`, `overlay`, `overlay_position`, `overlay_fade_s` |
+| `ui` | `window`, `tray`, `overlay`, `overlay_position`, `overlay_fade_s` |
 | `startup` | `chime`, `greeting`, `time_greeting`, `auto_briefing` |
 | `paths` | `logs_dir`, `data_dir` |
 | `logging.level` | `DEBUG`/`INFO`/`WARNING`/`ERROR` |

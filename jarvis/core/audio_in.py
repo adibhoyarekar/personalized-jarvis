@@ -728,7 +728,7 @@ class ListenMode(enum.Enum):
 class AudioEvent:
     """Something the voice loop must react to.
 
-    kind: "wake", "utterance", "no_speech" or "barge_in".
+    kind: "wake", "utterance", "no_speech" or "barge_in" (and "text" for a typed message).
     """
 
     kind: str

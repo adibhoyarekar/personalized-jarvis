@@ -90,6 +90,8 @@ class TrayActions(Protocol):
     def open_readme(self) -> None: ...
     def restart(self) -> None: ...
     def quit(self) -> None: ...
+    def has_window(self) -> bool: ...
+    def show_window(self) -> None: ...
 
 
 def tooltip(state: DisplayState, last_command: str, name: str = "Jarvis", limit: int = 127) -> str:
@@ -178,11 +180,15 @@ class TrayIcon:
                 radio=True,
             )
 
+        window = self.actions.has_window()
+        # Clicking the icon opens the window when there is one, otherwise it toggles mute.
+        top = [item(f"Open {self.name}", lambda _i, _it: self.actions.show_window(), default=True)] if window else []
         return menu(
+            *top,
             item(
                 lambda _it: "Unmute microphone" if self.actions.is_muted() else "Mute microphone",
                 lambda _i, _it: (self.actions.toggle_mute(), self.refresh()),
-                default=True,  # clicking the icon toggles mute
+                default=not window,
             ),
             item("Mode", menu(mode_item("Wake word (\"Hey Jarvis\")", "wake"), mode_item("Push-to-talk only", "push-to-talk"))),
             menu.SEPARATOR,

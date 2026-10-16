@@ -142,6 +142,7 @@ safety:
 # --- Desktop integration (Phase 5) ------------------------------------------
 
 ui:
+  window: true              # the desktop window (closing it hides Jarvis to the tray)
   tray: false               # always show the tray icon (it's on anyway under pythonw / --tray)
   overlay: false            # small on-screen box showing what Jarvis heard and says
   overlay_position: bottom-right   # top-left | top-right | bottom-left | bottom-right

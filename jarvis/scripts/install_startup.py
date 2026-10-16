@@ -31,13 +31,14 @@ def main() -> int:
     if args.status:
         print(status())
         return 0
-    launch_args = ["--push-to-talk", "--tray"] if args.push_to_talk else list(DEFAULT_ARGS)
+    launch_args = ["--push-to-talk", "--tray", "--minimized"] if args.push_to_talk else list(DEFAULT_ARGS)
     try:
         if not args.desktop_only:
             print(install(launch_args, use_task=not args.run_key))
             print("Jarvis will start about 30 seconds after you log in. Remove it with scripts\\uninstall_startup.py")
         if args.desktop or args.desktop_only:
-            print(f"Desktop shortcut created: {create_desktop_shortcut(launch_args)}")
+            on_screen = [arg for arg in launch_args if arg != "--minimized"]  # the shortcut opens the window
+            print(f"Desktop shortcut created: {create_desktop_shortcut(on_screen)}")
     except (OSError, FileNotFoundError) as exc:
         print(f"Failed: {exc}", file=sys.stderr)
         return 1

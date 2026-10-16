@@ -145,6 +145,7 @@ Corner = Literal["top-left", "top-right", "bottom-left", "bottom-right"]
 
 
 class UI(_Section):
+    window: Optional[bool] = None
     tray: Optional[bool] = None
     overlay: Optional[bool] = None
     overlay_position: Optional[Corner] = None

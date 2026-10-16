@@ -7,6 +7,8 @@ Usage:
     python main.py --text            # type to Jarvis, read replies
     python main.py --text --speak    # type, and hear the replies
     python main.py --tray            # with a system tray icon (default under pythonw)
+    python main.py --tray --minimized  # start hidden in the tray (used at login)
+    python main.py --no-window       # voice only, no desktop window
     python main.py --setup           # first-run wizard: API key, mic, wake word, projects
     python main.py --check           # PASS/FAIL health check of the whole setup
     python main.py --list-devices    # show audio devices and their indexes
@@ -26,7 +28,7 @@ from core.app import RESTART_ENV, build_runtime, make_tts
 from core.config import Config, ConfigError, load_config
 from core.logging_setup import setup_logging
 from core.notifications import show_toast
-from core.single_instance import SingleInstance
+from core.single_instance import SingleInstance, request_show
 from core.tts import SpeechStream, TTSEngine
 
 log = logging.getLogger("jarvis")
@@ -50,6 +52,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     tray.add_argument("--tray", dest="tray", action="store_true", default=None,
                       help="show the system tray icon (default when run with pythonw)")
     tray.add_argument("--no-tray", dest="tray", action="store_false", help="no tray icon")
+    window = parser.add_mutually_exclusive_group()
+    window.add_argument("--window", dest="window", action="store_true", default=None,
+                        help="show the desktop window (default; or set ui.window in config.yaml)")
+    window.add_argument("--no-window", dest="window", action="store_false", help="no desktop window")
+    parser.add_argument("--minimized", action="store_true",
+                        help="start with the window hidden in the tray (needs the tray icon)")
     parser.add_argument("--overlay", dest="overlay", action="store_true", default=None,
                         help="show the on-screen overlay (or set ui.overlay in config.yaml)")
     parser.add_argument("--speak", action="store_true", help="with --text: also speak replies")
@@ -159,12 +167,18 @@ def run_text(config: Config, speak: bool) -> int:
     return 0
 
 
-def acquire_instance_lock(config: Config) -> SingleInstance | None:
-    """One Jarvis at a time. After a restart, wait for the old process to exit first."""
+def acquire_instance_lock(config: Config, show_existing: bool = False) -> SingleInstance | None:
+    """One Jarvis at a time. After a restart, wait for the old process to exit first.
+
+    With ``show_existing``, a second launch brings the running Jarvis's window forward.
+    """
     lock = SingleInstance(config.path("paths.data_dir", "data"))
     wait = 15.0 if os.environ.pop(RESTART_ENV, None) else 0.0
     if lock.acquire(wait_s=wait):
         return lock
+    if show_existing and request_show():
+        log.info("Jarvis is already running; asked it to show its window")
+        return None
     pid = lock.other_pid()
     message = "Jarvis is already running" + (f" (process {pid})" if pid else "") + "."
     log.warning(message)
@@ -208,7 +222,7 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         return 0
 
-    lock = acquire_instance_lock(config)
+    lock = acquire_instance_lock(config, show_existing=not args.text)
     if lock is None:
         return 1
     try:
@@ -223,6 +237,8 @@ def main(argv: list[str] | None = None) -> int:
             debug=args.debug,
             tray=tray,
             overlay=args.overlay,
+            window=args.window,
+            start_hidden=args.minimized,
             argv=sys.argv[1:] if argv is None else argv,
         )
         return app.run()

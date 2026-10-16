@@ -99,11 +99,11 @@ def test_startup_task_xml_and_run_key() -> None:
     ns = {"t": "http://schemas.microsoft.com/windows/2004/02/mit/task"}
     assert root.find(".//t:LogonTrigger/t:UserId", ns).text == "DESKTOP\\Me & Co"  # escaped & round-trips
     assert root.find(".//t:Exec/t:Command", ns).text == str(pyw)
-    assert root.find(".//t:Exec/t:Arguments", ns).text == f'"{main}" --wake --tray'
+    assert root.find(".//t:Exec/t:Arguments", ns).text == f'"{main}" --wake --tray --minimized'
     assert root.find(".//t:Exec/t:WorkingDirectory", ns).text == str(main.parent)
     assert root.find(".//t:Settings/t:Hidden", ns).text == "true"
     assert root.find(".//t:Settings/t:DisallowStartIfOnBatteries", ns).text == "false"
-    assert command_line(pyw, main) == f'"{pyw}" "{main}" --wake --tray'
+    assert command_line(pyw, main) == f'"{pyw}" "{main}" --wake --tray --minimized'
 
 
 def test_desktop_shortcut_script_quotes_paths() -> None:
