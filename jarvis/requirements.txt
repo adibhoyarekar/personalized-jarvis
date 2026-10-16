@@ -18,5 +18,18 @@ pynput>=1.7.7             # hotkey fallback (and default on macOS/Linux)
 openwakeword>=0.6.0       # "hey jarvis" wake word (models download on first run)
 onnxruntime>=1.16         # runs the wake word and Silero VAD models (VAD model ships with faster-whisper)
 
+# Phase 4 - tools
+requests>=2.31            # weather (Open-Meteo) and news feeds
+feedparser>=6.0           # RSS news
+send2trash>=1.8.2         # delete_file -> Recycle Bin, never permanent
+pyperclip>=1.8.2          # clipboard
+pyautogui>=0.9.54         # media keys
+Pillow>=10.0              # screenshots
+screen-brightness-control>=0.20
+pycaw>=20240210; sys_platform == "win32"     # exact volume control
+comtypes>=1.2; sys_platform == "win32"
+winotify>=1.1.0; sys_platform == "win32"     # toast notifications for reminders
+# Web search uses `ddgs` (above), the current name of the duckduckgo-search package.
+
 # Dev / tests
 pytest>=8.0

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Literal, Optional
 
 import pytest
@@ -166,3 +167,35 @@ def test_registry_timeout() -> None:
     result = registry.run("1", "zz_test_slow", {})
     assert result.is_error and "timed out" in result.content
     registry.shutdown()
+
+
+def test_all_real_tools_have_valid_schemas() -> None:
+    """Every discovered tool has a description and a schema the API will accept."""
+    jsonschema = pytest.importorskip("jsonschema")
+    found = tools.discover()
+    expected = {
+        "open_app", "close_app", "set_volume", "mute", "unmute", "set_brightness", "lock_pc", "system_stats",
+        "screenshot", "shutdown_pc", "restart_pc", "cancel_shutdown",
+        "search_files", "open_file", "read_text_file", "create_note", "list_folder", "delete_file",
+        "web_search", "open_url", "get_weather", "get_news",
+        "open_project", "run_command_in_project", "git_status", "git_pull", "start_dev_server", "stop_dev_server",
+        "set_timer", "set_reminder", "add_todo", "read_todos", "complete_todo", "daily_briefing",
+        "play_pause", "next_track", "previous_track", "media_volume", "search_youtube", "open_spotify",
+        "read_clipboard", "write_clipboard", "summarize_clipboard",
+        "remember", "recall", "forget", "list_memories",
+    }
+    assert expected <= set(found), expected - set(found)
+    for name, spec in found.items():
+        if name.startswith("zz_"):
+            continue
+        api = spec.to_api()
+        assert re.fullmatch(r"[a-zA-Z0-9_-]{1,64}", api["name"])
+        assert len(api["description"]) >= 15, name
+        schema = api["input_schema"]
+        jsonschema.Draft202012Validator.check_schema(schema)
+        assert schema["type"] == "object" and schema["additionalProperties"] is False
+        assert set(schema["required"]) <= set(schema["properties"]), name
+        for prop, sub in schema["properties"].items():
+            assert "type" in sub, (name, prop)
+            if "default" in sub:
+                jsonschema.validate(sub["default"], {k: v for k, v in sub.items() if k != "default"})

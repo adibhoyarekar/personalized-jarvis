@@ -18,7 +18,10 @@ package, and the decorator records the function, its JSON schema (built from
 the type hints) and its description (built from the docstring).
 
 Mark anything with side effects you would not want by accident with
-``@tool(dangerous=True)``; the safety gate then asks for confirmation first.
+``@tool(dangerous=True, summary="delete {path}")``; the safety gate then says
+"I'm about to delete report.docx. Confirm?" and waits for a yes. Tools that
+run shell commands declare ``shell_arg="command"`` so the command is checked
+against the denylist and allowlist before anything else happens.
 """
 
 from __future__ import annotations
@@ -50,11 +53,18 @@ class ToolContext:
     Attributes:
         config: The loaded :class:`core.config.Config`.
         notify: Callback to tell the user something asynchronously (timers etc.).
-        extras: Additional services (memory store, speech, ...) keyed by name.
+            Voice mode speaks it; text mode prints it. Looked up at call time,
+            so it can be re-pointed after startup.
+        memory: The :class:`core.memory.Memory` store.
+        complete: ``complete(prompt) -> str``: a short one-off Claude call
+            (used by summarize_clipboard).
+        extras: Additional services keyed by name.
     """
 
     config: Any = None
     notify: Callable[[str], None] = print
+    memory: Any = None
+    complete: Callable[[str], str] | None = None
     extras: dict[str, Any] = field(default_factory=dict)
 
 
@@ -70,6 +80,21 @@ def set_context(context: ToolContext) -> None:
 def get_context() -> ToolContext:
     """Return the runtime context (config, notify callback, extras)."""
     return _context
+
+
+def get_memory() -> Any:
+    """The memory store; raises a clear error if Jarvis started without one."""
+    if _context.memory is None:
+        raise RuntimeError("Memory is not available")
+    return _context.memory
+
+
+def notify(message: str) -> None:
+    """Tell the user something now (spoken in voice mode). Never raises."""
+    try:
+        _context.notify(message)
+    except Exception:  # noqa: BLE001
+        log.exception("notify failed for %r", message)
 
 
 def setting(key: str, default: Any = None) -> Any:
@@ -97,6 +122,22 @@ class ToolSpec:
     input_schema: dict[str, Any]
     dangerous: bool
     module: str
+    summary: str | Callable[[dict[str, Any]], str] | None = None
+    shell_arg: str | None = None
+
+    def describe(self, args: dict[str, Any]) -> str:
+        """Short spoken description of a call, e.g. "delete report.docx"."""
+        if callable(self.summary):
+            try:
+                return str(self.summary(args))
+            except Exception:  # noqa: BLE001
+                log.debug("summary callable failed for %s", self.name, exc_info=True)
+        elif self.summary:
+            try:
+                return self.summary.format_map(_SummaryArgs(args))
+            except (KeyError, ValueError, IndexError):
+                pass
+        return self.name.replace("_", " ")
 
     def to_api(self) -> dict[str, Any]:
         """Tool definition in the shape the Messages API expects."""
@@ -107,6 +148,19 @@ class ToolSpec:
             # Stream tool inputs as they are generated; we validate them ourselves.
             "eager_input_streaming": True,
         }
+
+
+class _SummaryArgs(dict):
+    """format_map helper: missing args render as blanks; paths as their file name."""
+
+    def __missing__(self, key: str) -> str:
+        return ""
+
+    def __getitem__(self, key: str) -> Any:
+        value = super().__getitem__(key) if key in self else ""
+        if isinstance(value, str) and ("/" in value or "\\" in value) and key in ("path", "file", "folder"):
+            return value.replace("\\", "/").rstrip("/").rsplit("/", 1)[-1]
+        return value
 
 
 _REGISTRY: dict[str, ToolSpec] = {}
@@ -240,6 +294,8 @@ def tool(
     *,
     name: str | None = None,
     dangerous: bool = False,
+    summary: str | Callable[[dict[str, Any]], str] | None = None,
+    shell_arg: str | None = None,
 ) -> Any:
     """Register a function as a tool the model can call.
 
@@ -249,6 +305,12 @@ def tool(
         func: The function being decorated.
         name: Tool name shown to the model (defaults to the function name).
         dangerous: Require a yes/no confirmation before every call.
+        summary: What the call does, for the confirmation prompt: a format
+            string over the arguments ("close {name}") or a callable taking
+            the argument dict. Path arguments render as just the file name.
+        shell_arg: Name of an argument holding a shell command. The safety
+            gate checks it against the denylist/allowlist first and asks for
+            confirmation (unless ``safety.auto_approve_allowlist``).
     """
 
     def register(fn: Callable[..., Any]) -> Callable[..., Any]:
@@ -268,7 +330,11 @@ def tool(
             input_schema=schema,
             dangerous=dangerous,
             module=fn.__module__.rsplit(".", 1)[-1],
+            summary=summary,
+            shell_arg=shell_arg,
         )
+        if shell_arg and shell_arg not in schema["properties"]:
+            raise ToolDefinitionError(f"Tool '{tool_name}': shell_arg '{shell_arg}' is not a parameter")
         fn.__tool_spec__ = _REGISTRY[tool_name]  # type: ignore[attr-defined]
         return fn
 
@@ -389,6 +455,15 @@ class ToolResult:
 MAX_RESULT_CHARS = 12_000
 
 
+def short_error(exc: BaseException, limit: int = 300) -> str:
+    """A brief error string for the model to explain in its own words."""
+    message = str(exc).strip() or type(exc).__name__
+    if isinstance(exc, (FileNotFoundError, PermissionError, NotADirectoryError)) and exc.filename:
+        message = f"{exc.strerror or type(exc).__name__}: {exc.filename}"
+    message = f"Error: {message}"
+    return message if len(message) <= limit else message[: limit - 3] + "..."
+
+
 def format_result(value: Any) -> str:
     """Turn a tool's return value into text for the model (JSON for structures)."""
     if value is None:
@@ -485,14 +560,8 @@ class ToolRegistry:
                 tool_use_id, spec.name, format_result(value), False, time.perf_counter() - start
             )
         except Exception as exc:  # noqa: BLE001 - tool errors go back to the model
-            log.exception("Tool %s failed", spec.name)
-            return ToolResult(
-                tool_use_id,
-                spec.name,
-                f"{type(exc).__name__}: {exc}",
-                True,
-                time.perf_counter() - start,
-            )
+            log.warning("Tool %s failed: %s", spec.name, exc, exc_info=log.isEnabledFor(logging.DEBUG))
+            return ToolResult(tool_use_id, spec.name, short_error(exc), True, time.perf_counter() - start)
 
     def shutdown(self) -> None:
         self._pool.shutdown(wait=False, cancel_futures=True)

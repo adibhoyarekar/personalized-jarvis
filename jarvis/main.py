@@ -15,12 +15,16 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 from core.agent import Agent, AgentError
 from core.config import Config, ConfigError, load_config
 from core.logging_setup import setup_logging
-from core.safety import SafetyGate, parse_yes_no
+from core.memory import Memory
+from core.safety import SafetyGate, typed_confirm_factory
+from core.scheduler import ReminderScheduler
 from core.tts import SpeechStream, TTSEngine
 from tools import ToolContext, ToolRegistry, set_context
 
@@ -51,26 +55,49 @@ def _fix_console_encoding() -> None:
             pass
 
 
-def typed_confirm(question: str) -> bool:
-    """Ask a yes/no question in the terminal."""
-    try:
-        answer = input(f"\n  [confirm] {question} (yes/no) > ")
-    except (EOFError, KeyboardInterrupt):
-        return False
-    return parse_yes_no(answer)
+@dataclass
+class Runtime:
+    """Everything that must be shut down cleanly on exit."""
+
+    agent: Agent
+    memory: Memory
+    scheduler: ReminderScheduler
+    context: ToolContext
+
+    def set_notify(self, notify: Callable[[str], None]) -> None:
+        """Where timers/reminders and other asynchronous messages go."""
+        self.context.notify = notify
+
+    def close(self) -> None:
+        self.scheduler.stop()
+        self.agent.registry.shutdown()
+        self.agent.gate.close()
+        self.memory.close()
 
 
-def build_agent(config, confirm) -> Agent:  # type: ignore[no-untyped-def]
-    """Wire up tools, safety gate and the agent from config."""
-    set_context(ToolContext(config=config, notify=lambda msg: print(f"\n[Jarvis] {msg}")))
+def build_runtime(config: Config, confirm: Callable[[str], bool] | None = None) -> Runtime:
+    """Wire up memory, tools, the safety gate, the agent and the reminder scheduler."""
+    if confirm is None:
+        confirm = typed_confirm_factory(float(config.get("safety.confirm_timeout", 8)))
+    memory = Memory.from_config(config)
+    context = ToolContext(config=config, notify=lambda msg: print(f"\n[{config.get('assistant.name', 'Jarvis')}] {msg}"))
+    context.memory = memory
+    set_context(context)
     registry = ToolRegistry.from_config(config)
-    gate = SafetyGate(
-        confirm=confirm,
-        audit_log=config.path("paths.logs_dir", "logs") / "tool_calls.jsonl",
-        confirm_dangerous=bool(config.get("safety.confirm_dangerous", True)),
+    gate = SafetyGate.from_config(config, confirm)
+    agent = Agent(
+        config,
+        registry,
+        gate,
+        facts_provider=memory.prompt_context,
+        on_turn=lambda text, reply, calls: memory.add_command(text, reply, calls),
     )
+    context.complete = agent.complete
     log.info("Loaded %d tools: %s", len(registry.specs), ", ".join(sorted(registry.specs)))
-    return Agent(config, registry, gate)
+    # Late-bound so voice mode can re-point notify after startup.
+    scheduler = ReminderScheduler(memory, announce=lambda msg: context.notify(msg))
+    scheduler.start()
+    return Runtime(agent, memory, scheduler, context)
 
 
 HELP = """Commands: /tools  list tools   /reset  forget conversation   /quit  exit"""
@@ -99,7 +126,7 @@ def run_text_mode(agent: Agent, tts: TTSEngine | None = None) -> None:
             continue
         if cmd == "/tools":
             for spec in sorted(agent.registry.specs.values(), key=lambda s: s.name):
-                flag = " [needs confirmation]" if spec.dangerous else ""
+                flag = " [asks first]" if spec.dangerous or spec.shell_arg else ""
                 print(f"  {spec.name}{flag}: {spec.description.splitlines()[0]}")
             print()
             continue
@@ -204,10 +231,11 @@ def run_voice_mode(config: Config, wake: bool = True, debug: bool = False) -> in
     from core.voice import VoiceAssistant, VoiceSettings, debug_state_printer
 
     try:
-        agent = build_agent(config, typed_confirm)  # confirm is re-pointed below
+        runtime = build_runtime(config)  # confirm and notify are re-pointed below
     except AgentError as exc:
         print(f"Startup error: {exc}", file=sys.stderr)
         return 2
+    agent = runtime.agent
 
     try:
         recorder = MicRecorder(config.get("audio.input_device"), int(config.get("audio.sample_rate", 16000)))
@@ -252,6 +280,7 @@ def run_voice_mode(config: Config, wake: bool = True, debug: bool = False) -> in
             echo_tail_s=float(config.get("audio.echo_tail", 0.3)),
             filler=bool(config.get("tts.filler", True)),
             filler_delay=float(config.get("tts.filler_delay", 2.5)),
+            confirm_timeout=float(config.get("safety.confirm_timeout", 8)),
         )
         fillers = config.get("tts.fillers")
         if fillers:
@@ -263,6 +292,7 @@ def run_voice_mode(config: Config, wake: bool = True, debug: bool = False) -> in
             agent, recorder, stt, tts, settings=settings, pipeline=pipeline, state=state, sounds=sounds
         )
         agent.gate.confirm = assistant.confirm
+        runtime.set_notify(assistant.announce)
         assistant.run()
     except HotkeyError as exc:
         print(f"Hotkey error: {exc}", file=sys.stderr)
@@ -276,7 +306,7 @@ def run_voice_mode(config: Config, wake: bool = True, debug: bool = False) -> in
             if pipeline is not None:
                 pipeline.stop()
             recorder.close()
-        agent.registry.shutdown()
+        runtime.close()
     return 0
 
 
@@ -309,17 +339,25 @@ def main(argv: list[str] | None = None) -> int:
             return run_voice_mode(config, wake=not args.push_to_talk, debug=args.debug)
 
         try:
-            agent = build_agent(config, typed_confirm)
+            runtime = build_runtime(config)
         except AgentError as exc:
             print(f"Startup error: {exc}", file=sys.stderr)
             return 2
         tts = make_tts(config) if args.speak else None
+        if tts is not None:
+            name = runtime.agent.name
+
+            def notify(message: str) -> None:
+                print(f"\n[{name}] {message}")
+                tts.speak(message)
+
+            runtime.set_notify(notify)
         try:
-            run_text_mode(agent, tts)
+            run_text_mode(runtime.agent, tts)
         finally:
             if tts is not None:
                 tts.shutdown()
-            agent.registry.shutdown()
+            runtime.close()
         return 0
     finally:
         log.info("Jarvis stopped. Log: %s", log_file)

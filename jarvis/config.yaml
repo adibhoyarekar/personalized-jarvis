@@ -12,6 +12,7 @@ llm:
   effort: low               # low | medium | high - low keeps voice replies snappy
   max_history_turns: 10     # user/assistant exchanges kept as context
   max_tool_rounds: 8        # tool-call round trips allowed per request
+  max_tool_calls: 6         # total tool calls allowed per request (stops loops)
   request_timeout_s: 60
   max_retries: 2
   refusal_fallback: true    # let the API retry a declined request on a fallback model
@@ -21,24 +22,8 @@ tools:
   disabled: []              # tool names to hide from the model, e.g. [web_search]
   disabled_modules: []      # whole modules, e.g. [media_tools]
 
-  # Friendly names -> command/executable for open_app. Anything not listed is
-  # resolved through PATH and the Windows "App Paths" registry (like Win+R).
-  apps:
-    notepad: notepad.exe
-    calculator: calc.exe
-    explorer: explorer.exe
-    file explorer: explorer.exe
-    task manager: taskmgr.exe
-    paint: mspaint.exe
-    chrome: chrome
-    edge: msedge
-    firefox: firefox
-    vs code: code
-    vscode: code
-    terminal: wt
-    spotify: spotify
-
-  # Named folders for list_folder / file tools ("desktop", "downloads", ...).
+  # Spoken folder names for file tools ("desktop", "downloads", ...). File tools
+  # only work inside safe_roots below, so a name pointing elsewhere is refused.
   folders:
     home: "~"
     desktop: "~/Desktop"
@@ -102,8 +87,55 @@ tts:
   filler_delay: 2.5         # seconds of silence before the filler
   fillers: ["One moment.", "On it.", "Just a second."]
 
+# --- Tools, memory and safety (Phase 4) -------------------------------------
+
+# Friendly names -> command/executable for open_app. Anything not listed is
+# matched against your Start Menu shortcuts ("excel" -> Excel), then PATH.
+apps:
+  chrome: chrome.exe
+  vscode: code
+  vs code: code
+  spotify: spotify.exe
+  notepad: notepad.exe
+  calculator: calc.exe
+  explorer: explorer.exe
+  file explorer: explorer.exe
+  task manager: taskmgr.exe
+  paint: mspaint.exe
+  edge: msedge
+  firefox: firefox
+  terminal: wt
+
+# File tools (search, open, read, notes, delete) only work inside these folders.
+safe_roots: ["~/Documents", "~/Downloads", "~/Desktop"]
+notes_dir: "~/Documents/Jarvis Notes"          # must be inside safe_roots
+screenshots_dir: "~/Pictures/Jarvis Screenshots"
+
+# Your coding projects: "open cs-events", "git status for cs-events",
+# "start the cs-events dev server". Set path to the project folder.
+projects:
+  cs-events:
+    path: ""                # e.g. "~/code/cs-events" or "D:/projects/cs-events"
+    dev_command: "npm run dev"
+
+weather:
+  city: "Chhatrapati Sambhajinagar"
+  lat: 19.8762
+  lon: 75.3433
+  units: celsius            # celsius | fahrenheit
+
+news_feeds:
+  - "https://feeds.bbci.co.uk/news/world/rss.xml"
+
+briefing:
+  include: [weather, news, todos, reminders]
+
 safety:
   confirm_dangerous: true   # ask yes/no before tools marked dangerous=True
+  confirm_timeout: 8        # seconds; silence (or anything but a clear yes) = no
+  # Programs run_command_in_project may start. Everything else is blocked.
+  shell_allowlist: [git, npm, npx, python, pip, node, ls, dir]
+  auto_approve_allowlist: false   # true = allowlisted commands run without asking
 
 paths:
   logs_dir: logs

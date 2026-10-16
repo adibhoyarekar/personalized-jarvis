@@ -165,3 +165,71 @@ def test_system_prompt_includes_facts() -> None:
     prompt = build_system_prompt("Jarvis", "Tony", ["Favourite colour is red"])
     assert "Favourite colour is red" in prompt and "Tony" in prompt
     assert "markdown" in prompt
+
+
+@tools.tool(name="zz_agent_shell", shell_arg="command", summary="run '{command}'")
+def _shell(command: str) -> str:
+    """Pretend to run a shell command.
+
+    Args:
+        command: The command line.
+    """
+    return f"ran {command}"
+
+
+def test_tool_calls_capped_per_request(config, tmp_path: Path) -> None:
+    config.data["llm"]["max_tool_calls"] = 6
+    config.data["llm"]["max_tool_rounds"] = 5
+    many = [tool_block(f"t{i}", "zz_agent_echo", {"text": str(i)}) for i in range(8)]
+    client = FakeClient([message("tool_use", *many), message("end_turn", text_block("Done most of it."))])
+    agent = make_agent(config, client, tmp_path)
+    reply = agent.ask("echo eight things")
+    assert reply.tool_calls == 6 and reply.text == "Done most of it."
+    results = client.requests[1]["messages"][-1]["content"]
+    assert len(results) == 8  # every tool_use still gets a result
+    assert [r.get("is_error", False) for r in results] == [False] * 6 + [True] * 2
+    assert "limit of 6" in results[-1]["content"]
+
+
+def test_blocked_shell_command_is_explained_not_run(config, tmp_path: Path) -> None:
+    client = FakeClient(
+        [
+            message("tool_use", tool_block("t1", "zz_agent_shell", {"command": "rm -rf /"})),
+            message("end_turn", text_block("I can't run that; it's blocked.")),
+        ]
+    )
+    asked: list[str] = []
+    agent = make_agent(config, client, tmp_path, confirm=lambda q: asked.append(q) or True)
+    agent.ask("wipe everything")
+    result = client.requests[1]["messages"][-1]["content"][0]
+    assert result["is_error"] and "Blocked by the safety policy" in result["content"]
+    assert asked == []  # blocked before any confirmation
+
+
+def test_turns_are_reported_for_command_history(config, tmp_path: Path) -> None:
+    client = FakeClient(
+        [
+            message("tool_use", tool_block("t1", "zz_agent_echo", {"text": "hi"})),
+            message("end_turn", text_block("Echoed.")),
+        ]
+    )
+    agent = make_agent(config, client, tmp_path)
+    seen: list[tuple] = []
+    agent.on_turn = lambda text, reply, calls: seen.append((text, reply, calls))
+    agent.ask("echo hi")
+    assert seen == [("echo hi", "Echoed.", [{"tool": "zz_agent_echo", "args": {"text": "hi"}}])]
+
+
+def test_tool_exception_becomes_short_error(config, tmp_path: Path) -> None:
+    @tools.tool(name="zz_agent_boom")
+    def boom() -> str:
+        """Always fails."""
+        raise FileNotFoundError(2, "No such file", "C:/x/report.docx")
+
+    client = FakeClient(
+        [message("tool_use", tool_block("t1", "zz_agent_boom", {})), message("end_turn", text_block("Not found."))]
+    )
+    agent = make_agent(config, client, tmp_path)
+    agent.ask("open report")
+    result = client.requests[1]["messages"][-1]["content"][0]
+    assert result["is_error"] and result["content"] == "Error: No such file: C:/x/report.docx"

@@ -20,6 +20,7 @@ log = logging.getLogger(__name__)
 TextCallback = Callable[[str], None]
 StatusCallback = Callable[[str, str], None]
 FactsProvider = Callable[[str], list[str]]
+TurnCallback = Callable[[str, str, list[dict[str, Any]]], None]
 
 FALLBACK_BETA = "server-side-fallback-2026-07-01"
 
@@ -40,13 +41,29 @@ code blocks, emoji or URLs (unless the user asks you to spell one out).
 "Chrome is open." or "CPU is at twelve percent; all quiet."
 - If a tool fails, say so plainly and, if useful, suggest a fix in a few words.
 
+Your tools let you control this PC: open and close apps, volume, brightness, \
+media keys, screenshots, locking, shutdown; search, open, read and create \
+files in the user's allowed folders; web search, weather and news; the user's \
+coding projects (open in VS Code, git, run allowlisted commands, dev servers); \
+timers, reminders, to-dos and a daily briefing; the clipboard; and long-term \
+memory (remember, recall, forget).
+
 Using tools:
-- Use a tool whenever it helps answer or act; you can call several at once.
-- Don't ask for permission first: the system asks the user to confirm risky \
-actions itself. If the user declines, accept it gracefully.
-- If a request is ambiguous, pick the most sensible reading, or ask one short \
-question if guessing would be risky.
+- Use a tool whenever it helps answer or act; you can call several at once, \
+up to {max_calls} per request.
+- Act on sensible defaults. Ask for a missing detail only when you truly can't \
+proceed without it (e.g. which file to delete), in one short question.
+- Don't ask for permission first: the system itself asks the user to confirm \
+risky actions. If the user declines or a policy blocks a call, say so briefly \
+and don't retry it.
+- Only say you did something if the tool result shows it succeeded. If a tool \
+returns an error, explain the problem in plain words instead.
 - Never invent tool results. If you don't know and no tool can tell you, say so.
+- When the user says "remember that...", save it with remember. Things you \
+remember are listed below when relevant; use them naturally.
+- For reminders, convert the user's time into an exact local "YYYY-MM-DD HH:MM" \
+using the current date and time below.
+- For "do that again", check recent_commands if the conversation doesn't show it.
 
 Current local date and time: {now}.\
 {facts}"""
@@ -71,7 +88,11 @@ class Reply:
 
 
 def build_system_prompt(
-    name: str, user: str, facts: list[str] | None = None, now: dt.datetime | None = None
+    name: str,
+    user: str,
+    facts: list[str] | None = None,
+    now: dt.datetime | None = None,
+    max_calls: int = 6,
 ) -> str:
     """Render the system prompt, optionally including remembered facts."""
     now = now or dt.datetime.now()
@@ -80,15 +101,16 @@ def build_system_prompt(
     if facts:
         lines = "\n".join(f"- {f}" for f in facts)
         facts_block = (
-            "\n\nThings the user asked you to remember (use them when relevant, "
+            "\n\nSaved memories that may be relevant (use them when they help, "
             f"don't recite them unprompted):\n{lines}"
         )
     return SYSTEM_TEMPLATE.format(
         name=name,
         user=user,
         os_name=os_name,
-        now=now.strftime("%A %d %B %Y, %I:%M %p").replace(" 0", " "),
+        now=now.strftime("%A %d %B %Y, %I:%M %p (%Y-%m-%d %H:%M)").replace(" 0", " ", 1),
         facts=facts_block,
+        max_calls=max_calls,
     )
 
 
@@ -151,6 +173,8 @@ class Agent:
         gate: Safety gate used for dangerous tools and the audit log.
         client: Optional pre-built Anthropic client (tests inject a fake).
         facts_provider: Returns remembered facts relevant to the user's text.
+        on_turn: Called after each answered request with (text, reply, tool calls),
+            e.g. to store command history.
     """
 
     def __init__(
@@ -160,11 +184,14 @@ class Agent:
         gate: SafetyGate,
         client: Any | None = None,
         facts_provider: FactsProvider | None = None,
+        on_turn: TurnCallback | None = None,
     ) -> None:
         self.config = config
         self.registry = registry
         self.gate = gate
         self.facts_provider = facts_provider
+        self.on_turn = on_turn
+        self.max_tool_calls: int = int(config.get("llm.max_tool_calls", 6))
         self.model: str = config.get("llm.model", "claude-sonnet-5-5")
         self.max_tokens: int = int(config.get("llm.max_tokens", 16000))
         self.effort: str = str(config.get("llm.effort", "low"))
@@ -232,6 +259,30 @@ class Agent:
             finally:
                 status("idle", "")
 
+    def complete(self, prompt: str, max_tokens: int = 2000) -> str:
+        """One-off text completion without tools or history (used by tools like summarize_clipboard).
+
+        Raises:
+            AgentError: With a speakable message if the API call fails.
+        """
+        kwargs: dict[str, Any] = {
+            "model": self.model,
+            "max_tokens": max_tokens,
+            "messages": [{"role": "user", "content": prompt}],
+            "thinking": {"type": "adaptive"},
+            "output_config": {"effort": "low"},
+        }
+        if self.use_fallback:
+            kwargs["betas"] = [FALLBACK_BETA]
+            kwargs["fallbacks"] = "default"
+        try:
+            message = self.client.beta.messages.create(**kwargs)
+        except anthropic.AnthropicError as exc:
+            raise friendly_api_error(exc) from exc
+        if message.stop_reason == "refusal":
+            raise AgentError("I can't summarise that one.")
+        return "".join(b.text for b in message.content if b.type == "text").strip()
+
     # -- internals ---------------------------------------------------------
 
     def _system_prompt(self, user_text: str) -> str:
@@ -241,7 +292,7 @@ class Agent:
                 facts = self.facts_provider(user_text)
             except Exception:  # noqa: BLE001 - memory problems must not block replies
                 log.exception("Facts provider failed")
-        return build_system_prompt(self.name, self.user, facts)
+        return build_system_prompt(self.name, self.user, facts, max_calls=self.max_tool_calls)
 
     def _request_kwargs(self, system: str, messages: list[dict[str, Any]]) -> dict[str, Any]:
         kwargs: dict[str, Any] = {
@@ -268,6 +319,7 @@ class Agent:
         turn: list[dict[str, Any]] = [{"role": "user", "content": user_text}]
         spoken: list[str] = []
         tool_calls = 0
+        call_log: list[dict[str, Any]] = []
 
         def on_chunk(chunk: str) -> None:
             spoken.append(chunk)
@@ -301,6 +353,7 @@ class Agent:
                     continue
                 if stop != "tool_use" or not tool_uses:
                     self._commit(turn, "")
+                    self._notify_turn(user_text, "".join(spoken), call_log)
                     return Reply("".join(spoken), tool_calls=tool_calls)
 
                 if round_no == self.max_rounds:
@@ -308,8 +361,20 @@ class Agent:
 
                 if spoken and not "".join(spoken).endswith((" ", "\n")):
                     on_chunk(" ")
-                results = self._run_tools(tool_uses, status)
-                tool_calls += len(results)
+                budget = max(0, self.max_tool_calls - tool_calls)
+                results = self._run_tools(tool_uses[:budget], status)
+                results += [
+                    ToolResult(
+                        b.id,
+                        b.name,
+                        f"Not run: the limit of {self.max_tool_calls} tool calls per request was reached. "
+                        "Answer with what you have.",
+                        True,
+                    )
+                    for b in tool_uses[budget:]
+                ]
+                tool_calls += min(len(tool_uses), budget)
+                call_log += [{"tool": b.name, "args": b.input} for b in tool_uses[:budget]]
                 turn.append({"role": "user", "content": [r.to_api() for r in results]})
                 if self._cancel.is_set():
                     self._commit(turn, "".join(spoken), interrupted=True)
@@ -326,6 +391,14 @@ class Agent:
         except Exception as exc:  # noqa: BLE001 - never crash the main loop
             log.exception("Unexpected error while answering")
             return self._fail(turn, spoken, friendly_api_error(exc), emit, tool_calls)
+
+    def _notify_turn(self, text: str, reply: str, calls: list[dict[str, Any]]) -> None:
+        if self.on_turn is None:
+            return
+        try:
+            self.on_turn(text, reply, calls)
+        except Exception:  # noqa: BLE001 - history problems must not break replies
+            log.exception("on_turn callback failed")
 
     def _fail(
         self,
@@ -357,37 +430,37 @@ class Agent:
             return stream.get_final_message()
 
     def _run_tools(self, tool_uses: list[Any], status: StatusCallback) -> list[ToolResult]:
-        """Confirm (if dangerous) and execute tool calls; parallel where possible."""
-        # (block, future-or-result, needs_audit) - declined calls are audited by the gate.
-        pending: list[tuple[Any, Any, bool]] = []
+        """Validate, pass through the safety gate, and execute tool calls (parallel where possible)."""
+        # (block, future-or-result, args, confirmed) - blocked/declined calls are logged by the gate.
+        pending: list[tuple[Any, Any, dict[str, Any] | None, bool | None]] = []
         for block in tool_uses:
             name, args = block.name, block.input
             spec = self.registry.get(name)
             if spec is None:
-                pending.append((block, ToolResult(block.id, name, f"Unknown tool '{name}'", True), True))
+                pending.append((block, ToolResult(block.id, name, f"Unknown tool '{name}'", True), {}, None))
                 continue
             clean, error = validate_args(spec, args)
             if error:
-                pending.append((block, ToolResult(block.id, name, f"Invalid arguments: {error}", True), True))
+                result = ToolResult(block.id, name, f"Invalid arguments: {error}", True)
+                pending.append((block, result, args if isinstance(args, dict) else {"raw": args}, None))
                 continue
-            if not self.gate.approve(name, clean or {}, spec.dangerous):
-                declined = ToolResult(block.id, name, "The user declined this action.", True)
-                pending.append((block, declined, False))
+            decision = self.gate.review(spec, clean or {})
+            if not decision.allowed:
+                pending.append((block, ToolResult(block.id, name, decision.denial_message(), True), None, None))
                 continue
             status("tool", name)
-            pending.append((block, self.registry.submit(block.id, name, clean), True))
+            pending.append((block, self.registry.submit(block.id, name, clean), clean or {}, decision.confirmed))
 
         results: list[ToolResult] = []
-        for block, item, needs_audit in pending:
+        for block, item, logged_args, confirmed in pending:
             result = item if isinstance(item, ToolResult) else self.registry.wait(item, block.id, block.name)
-            if needs_audit:
-                args = block.input if isinstance(block.input, dict) else {"raw": block.input}
+            if logged_args is not None:  # None = the gate already logged it
                 self.gate.record(
                     block.name,
-                    args,
-                    approved=True,
+                    logged_args,
                     result=result.content,
                     is_error=result.is_error,
+                    confirmed=confirmed,
                     duration_s=result.duration_s,
                 )
             log.info("Tool %s -> %s%s", block.name, "ERROR " if result.is_error else "", result.content[:200])

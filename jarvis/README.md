@@ -3,9 +3,9 @@
 Say "Jarvis", ask for something, and it uses tools to control your PC and
 answers out loud. Built with Claude (Anthropic API) and local speech models.
 
-> **Status: Phase 3 of 5 - hands-free.** Say "Hey Jarvis", ask, and keep
-> talking; F9 push-to-talk still works alongside. More tools, memory and the
-> full safety gate arrive in Phase 4.
+> **Status: Phase 4 of 5 - full toolset.** Hands-free voice, 51 tools,
+> long-term memory, reminders that survive restarts, and a safety gate for
+> anything risky. The tray icon and run-at-startup arrive in Phase 5.
 
 ## Setup (Windows, Python 3.11+)
 
@@ -114,19 +114,132 @@ administrator too, or set `hotkey_backend: pynput` in `config.yaml`.
 | No speech, text only | edge-tts needs internet. Jarvis keeps printing replies while it's offline |
 | Different voice | `edge-tts --list-voices`, then set `tts.voice` (e.g. `en-US-GuyNeural`) |
 
-## Tools so far
+## Example voice commands
 
-| Tool | What it does |
+Say "Hey Jarvis" first (or hold F9). Inside the follow-up window you can skip it.
+
+**PC control**
+1. "Open Chrome." / "Open Excel." (Start Menu names work too)
+2. "Close Notepad." *(asks you to confirm)*
+3. "Set the volume to 30." / "Mute." / "Unmute."
+4. "Turn the brightness down to 40 percent."
+5. "How's my computer doing?" (CPU, RAM, disk, battery)
+6. "Take a screenshot."
+7. "Lock my PC."
+8. "Shut down the computer." *(confirm; 30 s grace)* then "Cancel the shutdown."
+
+**Files** (only inside `safe_roots`)
+9. "Find the invoice from March in my downloads."
+10. "What's on my desktop?"
+11. "Read me notes.txt from Documents."
+12. "Take a note: call the plumber on Monday."
+13. "Delete old-report.docx." *(confirm; goes to the Recycle Bin)*
+
+**Web**
+14. "What's the weather like?" / "Will it rain in Pune tomorrow?"
+15. "What's in the news?" / "Any cricket news?"
+16. "Search the web for the latest Python release."
+
+**Projects**
+17. "Open cs-events." (VS Code)
+18. "What's the git status of cs-events?"
+19. "Run npm test in cs-events." *(confirm; allowlisted programs only)*
+20. "Start the cs-events dev server." / "Stop the dev server."
+
+**Productivity**
+21. "Set a timer for 10 minutes for the pasta."
+22. "Remind me to call mom at 6 pm." / "What reminders do I have?"
+23. "Add renew passport to my to-do list." / "What's on my to-do list?" / "Mark passport as done."
+24. "Give me my daily briefing."
+
+**Media, clipboard, memory**
+25. "Pause the music." / "Next track." / "Play lofi beats on YouTube." / "Open Spotify and search Arijit Singh."
+26. "Summarize what's on my clipboard."
+27. "Remember that my locker code is 4512." / "What's my locker code?" / "Forget my locker code." *(confirm)*
+28. "Do that again." (Jarvis checks your recent commands)
+
+## Tools
+
+Each tool is one Python function with `@tool`. Run `python main.py --text`
+then `/tools` to list what's loaded. **Bold** = asks for confirmation first.
+
+| Module | Tools |
 |---|---|
-| `open_app` | Launches an app by name (aliases in `config.yaml` -> `tools.apps`) |
-| `system_stats` | CPU, RAM, disk and battery |
-| `open_url` | Opens a website in your default browser |
-| `web_search` | DuckDuckGo search, top results |
-| `list_folder` | Lists a folder (desktop, downloads, ... or any path) |
+| `system_tools` | `open_app` (config aliases, then fuzzy Start Menu match, then PATH), **`close_app`**, `set_volume`, `get_volume`, `mute`, `unmute`, `set_brightness`, `lock_pc`, `system_stats`, `screenshot`, **`shutdown_pc`**, **`restart_pc`** (30 s delay), `cancel_shutdown` |
+| `file_tools` | `search_files` (≤ 20 results), `open_file` (refuses programs/scripts), `read_text_file` (size-capped), `create_note`, `list_folder`, **`delete_file`** (Recycle Bin only) |
+| `web_tools` | `web_search` (DuckDuckGo, top 5), `open_url`, `get_weather` (Open-Meteo, no key), `get_news` (your RSS feeds) |
+| `dev_tools` | `open_project`, **`run_command_in_project`** (allowlist + confirm), `git_status`, **`git_pull`** (fast-forward only), `start_dev_server` (new terminal window), `stop_dev_server` |
+| `productivity_tools` | `set_timer`, `set_reminder`, `list_reminders`, `cancel_reminder`, `add_todo`, `read_todos`, `complete_todo`, `daily_briefing` |
+| `media_tools` | `play_pause`, `next_track`, `previous_track`, `media_volume`, `search_youtube`, `open_spotify` |
+| `clipboard_tools` | `read_clipboard`, `write_clipboard`, `summarize_clipboard` (2-sentence summary by Claude) |
+| `memory_tools` | `remember`, `recall`, **`forget`**, `list_memories`, `recent_commands` |
+
+At most **6 tool calls per request** (`llm.max_tool_calls`) to stop loops. If
+a tool fails, the model gets a short error message and explains it in plain
+words; it's told never to claim success unless the tool reported it.
+
+## Memory
+
+Everything lives in one SQLite file, `data/jarvis.db`:
+
+- **facts**: "remember that my wifi password is ...". Before every request,
+  the 5 facts with the most keyword overlap with what you said are added to
+  Claude's instructions. `recall` also matches typos ("wi fi pasword").
+- **preferences**: "remember that I prefer Celsius" (saved as a preference)
+  are always included.
+- **command_history**: your last 200 requests and the tools they used, for
+  "do that again".
+- **todos** and **reminders**: reminders and timers fire with a spoken
+  message plus a Windows notification. They're stored, so a reminder set
+  before a restart still fires afterwards. Anything that came due while
+  Jarvis was off is announced as "missed" at the next start.
+
+## Safety gate
+
+- **Confirmation:** tools marked `dangerous=True` make Jarvis say what it's about to do
+  ("I'm about to delete report.docx. It goes to the Recycle Bin. Confirm?")
+  and wait 8 s (`safety.confirm_timeout`) for an answer, spoken or typed in
+  text mode. "Yes", "yeah", "confirm", "do it" and "go ahead" approve. "No",
+  "cancel", "stop", "don't", anything unclear, or silence mean no.
+- **Shell commands** (`run_command_in_project`):
+  - **Denylist:** always blocked, whatever you answer. This covers
+    `format`, `del /s`, `rd /s`, `rm -rf`, `shutdown`, `reg delete`,
+    `diskpart`, `bcdedit` and similar, plus anything that mentions system
+    folders (`C:\Windows`, `System32`, `Program Files`, `ProgramData`,
+    a bare drive root).
+  - **One command at a time:** chaining (`&&`, `;`, `|`), redirection
+    (`>`) and substitution are blocked too.
+  - **Allowlist:** the first word must be on `safety.shell_allowlist`
+    (default `git, npm, npx, python, pip, node, ls, dir`). Anything else is
+    blocked with a spoken explanation.
+  - **Allowlisted commands still ask first**, unless you set
+    `safety.auto_approve_allowlist: true`.
+- **File tools** are confined to `safe_roots`. `..`, symlinks, drive paths
+  and absolute paths elsewhere are rejected before anything is touched.
+- **Audit log:** every tool call is written to `logs/tool_calls.log` as one
+  JSON line: time, tool, arguments, whether you confirmed, whether it was
+  blocked, and the result. The log rotates at 1 MB and keeps 5 old files.
+
+## Config reference (`config.yaml`)
+
+| Setting | What it does |
+|---|---|
+| `apps` | Spoken name -> program for `open_app` (`chrome: chrome.exe`) |
+| `safe_roots` | The only folders file tools may touch |
+| `notes_dir`, `screenshots_dir` | Where notes and screenshots go |
+| `projects` | `name: {path, dev_command}` for the dev tools |
+| `weather` | Default `city`, `lat`, `lon`, `units` |
+| `news_feeds` | RSS feed URLs for `get_news` and the briefing |
+| `briefing.include` | Any of `weather, news, todos, reminders` |
+| `safety.*` | `confirm_dangerous`, `confirm_timeout`, `shell_allowlist`, `auto_approve_allowlist` |
+| `llm.max_tool_calls` | Tool calls allowed per request (default 6) |
+| `tools.disabled` / `tools.disabled_modules` | Hide tools from the model without code changes |
+| `tools.folders` | Spoken folder names ("downloads") for file tools |
+| `wake.*`, `vad.*`, `follow_up.*`, `audio.*`, `stt.*`, `tts.*` | Voice settings (see the sections above) |
 
 ## Adding a tool
 
-Write one function anywhere in `tools/` with type hints and a docstring. That's it:
+Write one function anywhere in `tools/` (a new file works too) with type hints and a docstring. That's it:
 
 ```python
 from tools import tool
@@ -145,15 +258,20 @@ def flip_coin(times: int = 1) -> str:
 The decorator builds the JSON schema from the type hints (`str`, `int`,
 `float`, `bool`, `list[str]`, `Optional[...]`, `Literal[...]`) and the
 description from the docstring (the `Args:` section becomes parameter
-descriptions). Use `@tool(dangerous=True)` for anything destructive, so Jarvis
-asks "yes or no?" first. Disable tools without code changes via
+descriptions). For anything destructive use
+`@tool(dangerous=True, summary="delete {path}")`, so Jarvis says "I'm about to
+delete report.docx. Confirm?" first. A tool that runs shell commands declares
+`shell_arg="command"` so the denylist/allowlist applies. Tools can reach
+memory with `get_memory()`, settings with `setting("key")`, and speak later
+with `notify("...")`. Disable tools without code changes via
 `tools.disabled` / `tools.disabled_modules` in `config.yaml`.
 
 ## Files and logs
 
 - `config.yaml` - all settings; `.env` - your API key only.
 - `logs/jarvis.log` - main log (rotating).
-- `logs/tool_calls.jsonl` - one line per tool call: arguments, approval, result.
+- `logs/tool_calls.log` - one JSON line per tool call (rotating).
+- `data/jarvis.db` - memory, command history, todos and reminders.
 - Transcription times are logged ("Transcribed 2.1s of audio in 0.45s").
 
 ## Defaults chosen (change in `config.yaml`)
@@ -168,8 +286,8 @@ asks "yes or no?" first. Disable tools without code changes via
 - Voice: Whisper `small.en` with greedy decoding (`stt.beam_size: 1`) for
   speed, on your GPU if CUDA works, otherwise CPU int8. Voice
   `en-GB-RyanNeural` via edge-tts. F9 push-to-talk.
-- Spoken confirmations: anything other than a clear "yes" (including
-  silence for 20 seconds) counts as "no".
+- Confirmations: anything other than a clear "yes" (including 8 seconds of
+  silence) counts as "no".
 - Wake word `hey_jarvis` at threshold 0.5 with a 1.5 s cooldown. Plain
   "Jarvis" would need a custom-trained model (`wake.model` accepts a path to
   one).
@@ -178,3 +296,10 @@ asks "yes or no?" first. Disable tools without code changes via
 - Follow-up window 6 s. Exit phrases ("thanks", "that's all", "stop
   listening", "no", ...) are answered locally, with no API call.
 - Speakers assumed (`audio.headphones: false`), so voice barge-in is off.
+- File tools limited to Documents, Downloads and Desktop; notes go to
+  `Documents\Jarvis Notes`, screenshots to `Pictures\Jarvis Screenshots`.
+- Shell allowlist `git, npm, npx, python, pip, node, ls, dir`, always asking
+  first. Note that `python` and `node` can run any script, so keep the
+  confirmation on.
+- Web search uses the `ddgs` package, the current name of `duckduckgo-search`.
+- Weather defaults to Chhatrapati Sambhajinagar in Celsius.

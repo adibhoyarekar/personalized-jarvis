@@ -49,7 +49,7 @@ class VoiceSettings:
     filler_delay: float = 2.5
     fillers: list[str] = field(default_factory=lambda: ["One moment.", "On it.", "Just a second."])
     exit_replies: list[str] = field(default_factory=lambda: ["Anytime.", "Happy to help.", "Righto."])
-    confirm_timeout: float = 20.0
+    confirm_timeout: float = 8.0          # silence this long after a yes/no question = no
 
 
 class FillerTimer:
@@ -359,6 +359,13 @@ class VoiceAssistant:
         if self.tts is not None:
             self.tts.speak(text)
 
+    def announce(self, message: str) -> None:
+        """Say something unprompted (timers, reminders). Safe to call from any thread."""
+        self.print(f"\n[{self.agent.name}] {message}")
+        self.sounds.chime()
+        if self.tts is not None:
+            self.tts.speak(message)
+
     def on_tts_error(self, text: str, exc: Exception) -> None:
         """TTS failed: the reply is already printed, so just tell the user once."""
         if not self._speech_failed_notice:
@@ -379,7 +386,9 @@ class VoiceAssistant:
             if self.pipeline is not None:
                 hints.append("say yes or no")
                 self.state.set(S.LISTENING, "waiting for yes/no")
-                self.pipeline.set_mode(ListenMode.CAPTURE, start_timeout=8.0, ignore_s=self._echo_tail())
+                self.pipeline.set_mode(
+                    ListenMode.CAPTURE, start_timeout=self.settings.confirm_timeout, ignore_s=self._echo_tail()
+                )
             if self.ptt is not None:
                 hints.append(f"hold {self.settings.hotkey.upper()} and answer")  # type: ignore[union-attr]
             self.print(f"({' or '.join(hints)})")
