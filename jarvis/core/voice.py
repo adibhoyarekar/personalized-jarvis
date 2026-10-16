@@ -133,6 +133,14 @@ class VoiceAssistant:
         self._interrupted = threading.Event()      # user barged in on the current reply
         self._epoch = 0                            # bumps on every interruption
         self._speech_failed_notice = False
+        self._stop = threading.Event()             # stop() ends run()
+        self._muted = threading.Event()            # mic off: no wake word, no push-to-talk
+        self._wake_active = True                   # False = push-to-talk only (switchable)
+        #: Observers for the tray/overlay: called with what the user said,
+        #: with each streamed reply chunk, and when a reply is complete.
+        self.transcript_listeners: list[Callable[[str], None]] = []
+        self.reply_listeners: list[Callable[[str], None]] = []
+        self.reply_done_listeners: list[Callable[[], None]] = []
         self.ptt: PushToTalk | None = None
         if self.settings.hotkey:
             self.ptt = PushToTalk(
@@ -140,8 +148,57 @@ class VoiceAssistant:
             )
 
     @property
-    def wake_enabled(self) -> bool:
+    def wake_available(self) -> bool:
+        """A wake word model is loaded (so wake mode can be switched on)."""
         return self.pipeline is not None and self.pipeline.wake is not None
+
+    @property
+    def wake_enabled(self) -> bool:
+        return self.wake_available and self._wake_active
+
+    @property
+    def muted(self) -> bool:
+        return self._muted.is_set()
+
+    # -- control from other threads (tray) -----------------------------------------
+
+    def stop(self) -> None:
+        """End :meth:`run` soon (from any thread): cancels the reply and stops speech."""
+        self._stop.set()
+        self._interrupt("stop requested")
+        self.events.put(AudioEvent("stop"))
+
+    def set_muted(self, muted: bool) -> None:
+        """Mute/unmute the microphone: no wake word, follow-ups or push-to-talk while muted."""
+        if muted == self.muted:
+            return
+        if muted:
+            self._muted.set()
+            if getattr(self.recorder, "is_recording", False):
+                self.recorder.stop_recording()
+            if self.pipeline is not None:
+                self.pipeline.set_mode(ListenMode.OFF)
+            log.info("Microphone muted")
+        else:
+            self._muted.clear()
+            log.info("Microphone unmuted")
+        self.events.put(AudioEvent("mute_changed"))
+
+    def set_wake_active(self, active: bool) -> bool:
+        """Switch between wake word and push-to-talk-only. Returns False if no wake model is loaded."""
+        if active and not self.wake_available:
+            return False
+        self._wake_active = active
+        log.info("Mode: %s", "wake word" if active else "push-to-talk")
+        self.events.put(AudioEvent("mode_changed"))
+        return True
+
+    def _notify(self, listeners: list, *args: object) -> None:  # type: ignore[type-arg]
+        for listener in listeners:
+            try:
+                listener(*args)
+            except Exception:  # noqa: BLE001 - UI problems must not break the voice loop
+                log.exception("UI listener failed")
 
     # -- interruption (any thread) ----------------------------------------------
 
@@ -167,6 +224,9 @@ class VoiceAssistant:
     # -- hotkey callbacks (keyboard hook thread) ----------------------------------
 
     def _on_press(self) -> None:
+        if self.muted:
+            log.info("Push-to-talk ignored: microphone muted")
+            return
         if self._awaiting_answer.is_set():
             if self.tts is not None:
                 self.tts.stop()
@@ -179,6 +239,8 @@ class VoiceAssistant:
         self.state.set(S.LISTENING, "push-to-talk")
 
     def _on_release(self, held_s: float) -> None:
+        if self.muted:
+            return
         audio = self.recorder.stop_recording()
         if held_s < self.settings.min_press_s:
             log.info("Ignored %.2fs tap of the hotkey", held_s)
@@ -197,8 +259,12 @@ class VoiceAssistant:
 
     # -- main loop ------------------------------------------------------------------
 
-    def run(self) -> None:
-        """Handle voice events until Ctrl+C."""
+    def run(self, on_ready: Callable[[], None] | None = None) -> None:
+        """Handle voice events until Ctrl+C or :meth:`stop`.
+
+        Args:
+            on_ready: Called on this thread once listening has started (greeting, briefing).
+        """
         if self.ptt is not None:
             try:
                 self.ptt.start()
@@ -213,7 +279,9 @@ class VoiceAssistant:
         self._go_idle("ready")
         self.print(self._banner())
         try:
-            while True:
+            if on_ready is not None:
+                on_ready()
+            while not self._stop.is_set():
                 try:
                     event = self.events.get(timeout=0.3)
                 except queue.Empty:
@@ -229,11 +297,23 @@ class VoiceAssistant:
             ways.append(f'say "Hey {name}"')
         if self.ptt is not None:
             ways.append(f"hold {self.settings.hotkey.upper()}")  # type: ignore[union-attr]
+        if not ways:
+            return f"{name} is ready (no wake word or hotkey available). Ctrl+C quits.\n"
         return f"{name} is ready: {' or '.join(ways)} and speak. Ctrl+C quits.\n"
 
     def dispatch(self, event: AudioEvent) -> None:
         """React to one audio/hotkey event."""
         log.debug("Event: %s %s", event.kind, event.detail)
+        if event.kind in ("stop",):
+            return
+        if event.kind in ("mute_changed", "mode_changed"):
+            if self.state.is_(S.IDLE, S.FOLLOW_UP, S.LISTENING, S.WAKE_DETECTED):
+                self._go_idle(event.kind.replace("_", " "))
+            return
+        if self.muted and event.kind in ("wake", "utterance"):
+            log.info("Ignoring %s while muted", event.kind)
+            self._go_idle("muted")
+            return
         if event.kind == "wake":
             self.state.set(S.WAKE_DETECTED, "wake word")
             self.sounds.chime()
@@ -259,10 +339,19 @@ class VoiceAssistant:
         if not text:
             self._go_idle("nothing intelligible")
             return
+        self._notify(self.transcript_listeners, text)
         if is_exit_phrase(text):
             self.print(f"You: {text}")
             self._end_conversation()
             return
+        self.respond(text, epoch)
+
+    def respond(self, text: str, epoch: int | None = None) -> None:
+        """Answer ``text`` (as if spoken), wait for the speech to finish, then follow-up or idle."""
+        epoch = self._epoch if epoch is None else epoch
+        self.state.set(S.THINKING, "answering")
+        if self.pipeline is not None:
+            self.pipeline.set_mode(ListenMode.MONITOR)
         self.handle(text)
         if epoch != self._epoch:
             return  # barged in: the new request is already being captured
@@ -291,6 +380,7 @@ class VoiceAssistant:
                 filler.text_arrived()
             self.print(chunk, end="", flush=True)
             stream.feed(chunk)
+            self._notify(self.reply_listeners, chunk)
 
         def on_status(state: str, detail: str) -> None:
             if state == "tool":
@@ -310,13 +400,14 @@ class VoiceAssistant:
             return
         stream.finish()
         self.print("\n")
+        self._notify(self.reply_done_listeners)
 
     def _speak_filler(self) -> None:
         if self.tts is not None and not self._interrupted.is_set():
             self.tts.speak(random.choice(self.settings.fillers))
 
     def _after_reply(self) -> None:
-        if self.settings.follow_up and self.pipeline is not None:
+        if self.settings.follow_up and self.wake_enabled and not self.muted:
             self.state.set(S.FOLLOW_UP, f"{self.settings.follow_up_window:.0f}s follow-up window")
             self.pipeline.set_mode(
                 ListenMode.FOLLOW_UP, start_timeout=self.settings.follow_up_window, ignore_s=self._echo_tail()
@@ -333,7 +424,7 @@ class VoiceAssistant:
     def _go_idle(self, reason: str) -> None:
         self.state.set(S.IDLE, reason)
         if self.pipeline is not None:
-            mode = ListenMode.WAKE if self.wake_enabled else ListenMode.OFF
+            mode = ListenMode.WAKE if self.wake_enabled and not self.muted else ListenMode.OFF
             self.pipeline.set_mode(mode, ignore_s=self._echo_tail())
 
     def _echo_tail(self) -> float:
@@ -421,13 +512,23 @@ class VoiceAssistant:
         return None
 
     def close(self) -> None:
-        """Release the hotkey, audio pipeline, microphone and audio output."""
+        """End this session: release the hotkey and stop the audio pipeline.
+
+        The microphone and TTS engine are shared across restarts and are
+        released by :meth:`release` (or by their owner).
+        """
         try:
             if self.ptt is not None:
                 self.ptt.stop()
         finally:
             if self.pipeline is not None:
                 self.pipeline.stop()
+
+    def release(self) -> None:
+        """:meth:`close`, plus release the microphone and audio output."""
+        try:
+            self.close()
+        finally:
             self.recorder.close()
             if self.tts is not None:
                 self.tts.shutdown()

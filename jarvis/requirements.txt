@@ -31,5 +31,11 @@ comtypes>=1.2; sys_platform == "win32"
 winotify>=1.1.0; sys_platform == "win32"     # toast notifications for reminders
 # Web search uses `ddgs` (above), the current name of the duckduckgo-search package.
 
+# Phase 5 - tray, overlay, config validation
+pystray>=0.19.5           # system tray icon
+pydantic>=2.6             # config.yaml validation (also used by the anthropic SDK)
+# Pillow and winotify are listed above; tkinter (overlay) ships with Python on Windows.
+
 # Dev / tests
 pytest>=8.0
+jsonschema>=4.0          # tool schema tests

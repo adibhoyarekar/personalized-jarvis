@@ -28,7 +28,7 @@ def setup_logging(logs_dir: Path, level: str = "INFO", console: bool = False) ->
         root.removeHandler(handler)
 
     file_handler = logging.handlers.RotatingFileHandler(
-        log_file, maxBytes=2_000_000, backupCount=3, encoding="utf-8"
+        log_file, maxBytes=2_000_000, backupCount=4, encoding="utf-8"  # 5 files x 2 MB
     )
     file_handler.setFormatter(
         logging.Formatter("%(asctime)s %(levelname)-7s %(name)s: %(message)s")

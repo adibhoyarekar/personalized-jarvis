@@ -7,11 +7,13 @@ import logging
 import os
 import platform
 import threading
+import time
 from dataclasses import dataclass
 from typing import Any, Callable
 
 import anthropic
 
+from core.offline import OFFLINE_HELP, OfflineRouter
 from core.safety import SafetyGate
 from tools import ToolRegistry, ToolResult, validate_args
 
@@ -191,6 +193,15 @@ class Agent:
         self.gate = gate
         self.facts_provider = facts_provider
         self.on_turn = on_turn
+        #: False while the API is unreachable: simple commands are then handled locally.
+        self.online = True
+        #: Called when a request fails because the API can't be reached / works again.
+        self.on_connection_lost: Callable[[], None] | None = None
+        self.on_connection_restored: Callable[[], None] | None = None
+        #: While offline, requests the local router can't handle retry the API after this long.
+        self.offline_retry_s = 20.0
+        self._last_connection_error = 0.0
+        self.offline_router = OfflineRouter()
         self.max_tool_calls: int = int(config.get("llm.max_tool_calls", 6))
         self.model: str = config.get("llm.model", "claude-sonnet-5-5")
         self.max_tokens: int = int(config.get("llm.max_tokens", 16000))
@@ -259,6 +270,21 @@ class Agent:
             finally:
                 status("idle", "")
 
+    def ping(self, timeout: float = 6.0) -> str:
+        """Cheap reachability check: "ok", "offline", "auth" (bad key) or "error"."""
+        try:
+            self.client.with_options(timeout=timeout, max_retries=0).models.retrieve(self.model)
+            return "ok"
+        except (anthropic.APIConnectionError, anthropic.APITimeoutError):
+            return "offline"
+        except (anthropic.AuthenticationError, anthropic.PermissionDeniedError):
+            return "auth"
+        except anthropic.NotFoundError:
+            return "ok"  # reachable; the model name problem surfaces on the first request
+        except Exception:  # noqa: BLE001
+            log.exception("API ping failed")
+            return "error"
+
     def complete(self, prompt: str, max_tokens: int = 2000) -> str:
         """One-off text completion without tools or history (used by tools like summarize_clipboard).
 
@@ -314,6 +340,14 @@ class Agent:
     def _ask_locked(self, user_text: str, emit: TextCallback, status: StatusCallback) -> Reply:
         if not user_text:
             return Reply("")
+        if not self.online:
+            local = self._try_local(user_text, emit)
+            if local is not None:
+                return local
+            if time.monotonic() - self._last_connection_error < self.offline_retry_s:
+                emit(OFFLINE_HELP)
+                return Reply(OFFLINE_HELP, error=True)
+            # Long enough since the last failure: try the API again.
         system = self._system_prompt(user_text)
         past = [m for turn in self._history[-self.max_turns :] for m in turn]
         turn: list[dict[str, Any]] = [{"role": "user", "content": user_text}]
@@ -329,6 +363,8 @@ class Agent:
             for round_no in range(self.max_rounds + 1):
                 status("thinking", "")
                 message = self._stream_once(system, past + turn, on_chunk)
+                if not self.online:
+                    self._set_online()
                 if message is None:  # cancelled mid-stream
                     self._commit(turn, "".join(spoken), interrupted=True)
                     return Reply("".join(spoken), interrupted=True, tool_calls=tool_calls)
@@ -385,12 +421,68 @@ class Agent:
         except AgentError as err:
             log.error("Agent error: %s", err)
             return self._fail(turn, spoken, err, emit, tool_calls)
+        except anthropic.APIConnectionError as exc:  # includes timeouts
+            log.error("API unreachable: %r", exc)
+            self.online = False
+            self._last_connection_error = time.monotonic()
+            if self.on_connection_lost is not None:
+                try:
+                    self.on_connection_lost()
+                except Exception:  # noqa: BLE001
+                    log.exception("on_connection_lost failed")
+            if tool_calls == 0 and not spoken:
+                local = self._try_local(user_text, emit)
+                if local is not None:
+                    return local
+            return self._fail(turn, spoken, friendly_api_error(exc), emit, tool_calls)
         except anthropic.AnthropicError as exc:
             log.error("Anthropic API error: %r", exc)
             return self._fail(turn, spoken, friendly_api_error(exc), emit, tool_calls)
         except Exception as exc:  # noqa: BLE001 - never crash the main loop
             log.exception("Unexpected error while answering")
             return self._fail(turn, spoken, friendly_api_error(exc), emit, tool_calls)
+
+    def _set_online(self) -> None:
+        self.online = True
+        log.info("API reachable again")
+        if self.on_connection_restored is not None:
+            try:
+                self.on_connection_restored()
+            except Exception:  # noqa: BLE001
+                log.exception("on_connection_restored failed")
+
+    def _try_local(self, text: str, emit: TextCallback) -> Reply | None:
+        """Handle a simple command without the API (degraded mode). None if not understood."""
+        command = self.offline_router.match(text)
+        if command is None:
+            return None
+        log.info("Handling locally (offline): %r -> %s", text, command.tool or "answer")
+        calls: list[dict[str, Any]] = []
+        if command.answer is not None:
+            reply = command.answer
+        else:
+            spec = self.registry.get(command.tool or "")
+            if spec is None:
+                return None
+            clean, error = validate_args(spec, command.args)
+            if error:
+                return None
+            decision = self.gate.review(spec, clean or {})
+            if not decision.allowed:
+                reply = "Blocked by my safety rules." if decision.blocked else "Okay, I'll leave it."
+            else:
+                result = self.registry.run("local", spec.name, clean)
+                self.gate.record(spec.name, clean or {}, result=result.content, is_error=result.is_error,
+                                 confirmed=decision.confirmed, duration_s=result.duration_s)
+                calls.append({"tool": spec.name, "args": clean, "offline": True})
+                reply = (
+                    f"That didn't work: {result.content.removeprefix('Error: ')}" if result.is_error
+                    else result.content
+                )
+        emit(reply)
+        self._commit([{"role": "user", "content": text}], reply)
+        self._notify_turn(text, reply, calls)
+        return Reply(reply, tool_calls=len(calls))
 
     def _notify_turn(self, text: str, reply: str, calls: list[dict[str, Any]]) -> None:
         if self.on_turn is None:

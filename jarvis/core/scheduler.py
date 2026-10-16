@@ -8,27 +8,13 @@ from __future__ import annotations
 
 import datetime as dt
 import logging
-import sys
 import threading
 from typing import Callable
 
 from core.memory import Memory, Reminder
+from core.notifications import show_toast
 
 log = logging.getLogger(__name__)
-
-
-def show_toast(title: str, message: str) -> None:
-    """Windows toast notification (no-op elsewhere or if winotify is missing)."""
-    if sys.platform != "win32":
-        return
-    try:
-        from winotify import Notification, audio
-
-        toast = Notification(app_id="Jarvis", title=title, msg=message, duration="long")
-        toast.set_audio(audio.Reminder, loop=False)
-        toast.show()
-    except Exception as exc:  # noqa: BLE001 - notifications are best effort
-        log.warning("Toast notification failed: %s", exc)
 
 
 class ReminderScheduler:

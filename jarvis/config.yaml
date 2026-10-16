@@ -137,6 +137,20 @@ safety:
   shell_allowlist: [git, npm, npx, python, pip, node, ls, dir]
   auto_approve_allowlist: false   # true = allowlisted commands run without asking
 
+# --- Desktop integration (Phase 5) ------------------------------------------
+
+ui:
+  tray: false               # always show the tray icon (it's on anyway under pythonw / --tray)
+  overlay: false            # small on-screen box showing what Jarvis heard and says
+  overlay_position: bottom-right   # top-left | top-right | bottom-left | bottom-right
+  overlay_fade_s: 4         # seconds after going idle before it fades
+
+startup:
+  chime: true               # chime when Jarvis is ready
+  greeting: "Jarvis online."   # spoken at launch ("" = silent)
+  time_greeting: true       # prefix with "Good morning, <user_name>."
+  auto_briefing: false      # daily briefing on the first launch of each day
+
 paths:
   logs_dir: logs
   data_dir: data

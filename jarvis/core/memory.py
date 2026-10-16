@@ -57,6 +57,10 @@ CREATE TABLE IF NOT EXISTS reminders (
     fired_at TEXT,
     cancelled_at TEXT
 );
+CREATE TABLE IF NOT EXISTS app_state (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 CREATE INDEX IF NOT EXISTS idx_reminders_due ON reminders(due_at) WHERE fired_at IS NULL AND cancelled_at IS NULL;
 """
 
@@ -321,6 +325,18 @@ class Memory:
                 "UPDATE reminders SET cancelled_at = ? WHERE id = ? AND fired_at IS NULL AND cancelled_at IS NULL",
                 (_now(), reminder_id),
             ).rowcount
+        )
+
+    # -- internal app state (never shown to the model) ---------------------------
+
+    def get_state(self, key: str, default: str | None = None) -> str | None:
+        rows = self._query("SELECT value FROM app_state WHERE key = ?", (key,))
+        return rows[0]["value"] if rows else default
+
+    def set_state(self, key: str, value: str) -> None:
+        self._exec(
+            "INSERT INTO app_state (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (key, value),
         )
 
     def iter_tables(self) -> Iterator[str]:  # pragma: no cover - debugging helper

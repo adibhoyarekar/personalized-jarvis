@@ -68,14 +68,16 @@ def resolve_path(raw: str, base_dir: Path | None = None) -> Path:
     return expanded
 
 
-def load_config(path: Path | None = None) -> Config:
+def load_config(path: Path | None = None, validate: bool = True) -> Config:
     """Load ``config.yaml`` and the sibling ``.env`` file.
 
     Args:
         path: Config file to load. Defaults to ``config.yaml`` next to ``main.py``.
+        validate: Check types and ranges (see :mod:`core.config_schema`).
 
     Raises:
-        ConfigError: If the file is missing or is not valid YAML.
+        ConfigError: If the file is missing, isn't valid YAML, or has bad values.
+            The message lists every problem, one per line.
     """
     path = path or DEFAULT_CONFIG_PATH
     if not path.is_file():
@@ -86,6 +88,13 @@ def load_config(path: Path | None = None) -> Config:
         raise ConfigError(f"config.yaml is not valid YAML: {exc}") from exc
     if not isinstance(data, dict):
         raise ConfigError("config.yaml must contain a mapping at the top level")
+    if validate:
+        from core.config_schema import validate_config
+
+        problems = validate_config(data)
+        if problems:
+            lines = "\n".join(f"  - {p}" for p in problems)
+            raise ConfigError(f"{path.name} has {len(problems)} problem(s):\n{lines}")
 
     env_file = path.parent / ".env"
     if env_file.is_file():

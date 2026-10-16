@@ -1,305 +1,356 @@
-# Jarvis - personal voice assistant for Windows
+# Jarvis: a hands-free voice assistant for Windows
 
-Say "Jarvis", ask for something, and it uses tools to control your PC and
-answers out loud. Built with Claude (Anthropic API) and local speech models.
+Say **"Hey Jarvis"**, ask for something, and Jarvis controls your PC, looks
+things up and answers out loud. It runs in your system tray, starts with
+Windows, and recovers from crashes on its own.
 
-> **Status: Phase 4 of 5 - full toolset.** Hands-free voice, 51 tools,
-> long-term memory, reminders that survive restarts, and a safety gate for
-> anything risky. The tray icon and run-at-startup arrive in Phase 5.
+```
+"Hey Jarvis" ──► wake word ──► listen until you stop ──► speech-to-text
+   (local)       openWakeWord       Silero VAD            faster-whisper (local)
+                                                                │
+   speak the reply ◄── text-to-speech ◄── Claude + 51 tools ◄───┘
+   sentence by sentence   edge-tts         (safety gate for anything risky)
+```
 
-## Setup (Windows, Python 3.11+)
+## Features
+
+- **Hands-free:** a wake word, voice activity detection, a 6-second follow-up
+  window with no wake word needed, and barge-in (interrupt Jarvis mid-sentence).
+  F9 push-to-talk works alongside.
+- **Fast:** replies stream, and speech starts after the first sentence. Whisper
+  runs locally (on your GPU if it can).
+- **51 tools:** apps, volume, brightness, screenshots, files, web search,
+  weather, news, coding projects, git, timers, reminders, to-dos, a daily
+  briefing, media keys, the clipboard and long-term memory.
+- **Safe by default:** risky actions ask "Confirm?" first. Shell commands go
+  through an allowlist and a hard denylist. File tools are confined to the
+  folders you choose. Every tool call is logged.
+- **Memory:** it remembers facts and preferences, keeps your last 200 commands,
+  and stores reminders that survive restarts.
+- **Desktop integration:** a tray icon that changes colour with the state, an
+  optional on-screen overlay, run-at-login, a single instance, automatic
+  crash recovery, and an offline mode for simple commands.
+- **Easy to extend:** a new tool is one function plus `@tool`.
+
+## Requirements
+
+- Windows 10 or 11, Python **3.11 or newer** (python.org installer; tick "Add to PATH").
+- A microphone and speakers or headphones.
+- An Anthropic API key (https://platform.claude.com/settings/keys).
+- About 1 GB of disk for the speech model. A GPU is optional.
+- Internet for Claude, edge-tts voices, weather and news. Wake word and
+  speech recognition run offline.
+
+## Install
 
 ```powershell
-cd jarvis
+git clone https://github.com/adibhoyarekar/personalized-jarvis
+cd personalized-jarvis\jarvis
 py -3.11 -m venv .venv
 .venv\Scripts\activate
-pip install -r requirements.txt
-copy .env.example .env        # then paste your key into .env
+pip install -r requirements.txt        # or: pip install -e .
+python main.py --setup                 # API key, mic, wake word, city, projects
+python main.py --check                 # everything should be PASS
+python main.py                         # say "Hey Jarvis"
 ```
 
-Get an API key at https://platform.claude.com/settings/keys and put it in
-`jarvis\.env` as `ANTHROPIC_API_KEY=...`.
+No ffmpeg is needed. The first voice run downloads the Whisper `small.en`
+model (~500 MB) and the `hey_jarvis` wake word model (a few MB); both
+happen once.
 
-Voice needs nothing beyond `pip install -r requirements.txt`: the Windows
-wheels of `sounddevice` and `soundfile` include PortAudio and an MP3 decoder,
-so **ffmpeg is not required**. The first voice run downloads the Whisper
-`small.en` model (about 500 MB) to the Hugging Face cache, and the
-`hey_jarvis` wake word model (a few MB) into the openwakeword package folder.
-Both happen once. The voice-activity model (Silero) ships with faster-whisper,
-so there's no torch download.
+## The setup wizard (`--setup`)
 
-## Run
+`python main.py --setup` asks, one question at a time (Enter keeps the
+current value):
 
-```powershell
-python main.py --list-devices   # find your mic/speaker indexes
-python main.py                  # hands-free: "Hey Jarvis" (same as --wake); F9 also works
-python main.py --debug          # same, printing state changes and live wake word scores
-python main.py --push-to-talk   # F9 only, no wake word
-python main.py --text           # type to Jarvis (debug mode)
-python main.py --text --speak   # type, and hear the replies
-python -m pytest                # run the tests
-```
+1. Your Anthropic API key. It's tested, then saved to `jarvis\.env`.
+2. What Jarvis should call you.
+3. Which microphone and which speakers, picked from a numbered list.
+4. Wake word sensitivity (0.2-0.9).
+5. Headphones or speakers (this decides whether you can interrupt by voice).
+6. Your city for weather. It's looked up to get the coordinates.
+7. Your coding projects (folder and dev-server command).
+8. Extra folders the file tools may use.
 
-In text mode: `/tools` lists tools, `/reset` clears the conversation, `/quit` exits.
+The wizard edits only the lines it needs, so your comments in
+`config.yaml` stay. The previous file is kept as `config.yaml.bak`, and the
+result is validated before it's kept.
 
-### Hands-free (wake word)
+## Command line
 
-1. Say **"Hey Jarvis"**. A two-note chime means it heard you.
-2. Say your request. It stops recording after about a second of silence
-   (`vad.silence_timeout`). If you say nothing for 5 s it quietly goes back
-   to sleep.
-3. Jarvis answers. For the next **6 seconds** you can just talk, no wake word
-   needed ("and what about tomorrow?"). Say "thanks", "that's all" or
-   "stop listening" to end early; silence ends it too.
+| Flag | What it does |
+|---|---|
+| *(none)* / `--wake` | Hands-free: "Hey Jarvis" (F9 also works) |
+| `--push-to-talk` | Hold F9 to talk; no wake word |
+| `--text` | Type instead of talk (great for debugging); `--speak` also reads replies aloud |
+| `--tray` / `--no-tray` | Show/hide the tray icon (on by default under `pythonw`) |
+| `--overlay` | Show the on-screen overlay (or set `ui.overlay: true`) |
+| `--setup` | First-run wizard |
+| `--check` | PASS/FAIL table: API key, Claude reachable, mic, speakers, models, TTS, hotkey, folders, projects |
+| `--list-devices` | Audio devices with their indexes |
+| `--debug` | Print state changes and live wake word scores; verbose `logs\jarvis.log` |
+| `--config PATH` | Use another config file |
 
-You can also say it in one breath ("Hey Jarvis, open Spotify"). If the wake
-word model can't load (no internet on first run, say), Jarvis prints a
-warning and falls back to push-to-talk.
+Text mode commands: `/tools`, `/reset`, `/quit`.
 
-The flow is a small state machine, `IDLE -> WAKE_DETECTED -> LISTENING ->
-THINKING -> SPEAKING -> FOLLOW_UP -> IDLE`, in `core/state.py`. `--debug`
-prints every transition, and the tray icon (Phase 5) subscribes to it.
+## Using it
 
-If a tool is slow (2.5 s with no reply yet), Jarvis says a short filler such
-as "One moment." Turn this off with `tts.filler: false`.
+1. Say **"Hey Jarvis"**. You'll hear a two-note chime and the tray icon turns green.
+2. Say your request. Recording stops after about a second of silence.
+3. Jarvis answers (the icon goes amber while thinking, blue while speaking).
+   For 6 seconds afterwards you can just keep talking. "Thanks", "that's all"
+   or "stop listening" ends it early.
+
+You can say it in one breath ("Hey Jarvis, open Spotify"). Press **F9** at any
+time to interrupt and talk.
+
+### Tray icon
+
+| Colour | Meaning |
+|---|---|
+| Gray | Idle, waiting for "Hey Jarvis" |
+| Green | Listening (wake word heard, follow-up window) |
+| Amber | Thinking / running tools |
+| Blue | Speaking |
+| Red, crossed out | Microphone muted |
+| Dark red | Error; Jarvis restarts automatically (up to 5 times in 10 minutes) |
+
+Hover over the icon for the state and the last command. Right-click for the
+menu: **Mute/Unmute microphone** (a left-click on the icon also toggles it), **Mode** (wake
+word or push-to-talk only), **Open logs folder**, **Open config.yaml**,
+**Open README**, **Restart Jarvis** and **Quit**.
 
 ### Speakers or headphones? (`audio.headphones`)
 
 The microphone can't tell your voice from Jarvis's voice coming out of your
-speakers, so interrupting Jarvis by voice ("barge-in") only works reliably
-with headphones.
+speakers, so interrupting by voice needs headphones.
 
 | | `headphones: false` (default, speakers) | `headphones: true` |
 |---|---|---|
-| Interrupt by saying "Hey Jarvis" while it talks | No, detection pauses while Jarvis speaks | Yes |
+| Interrupt by saying "Hey Jarvis" while it talks | No, listening pauses while Jarvis speaks | Yes |
 | Interrupt by just talking over it (0.4 s+) | No | Yes |
 | Interrupt with F9 | Yes | Yes |
-| Risk of Jarvis hearing itself | None (and the first 0.3 s after it stops is ignored) | High if you're actually on speakers |
+| Risk of Jarvis hearing itself | None (the first 0.3 s after it stops is ignored too) | High if you're really on speakers |
 
-On speakers, follow-up listening starts right after Jarvis stops talking. On
-headphones you can cut in at any point.
+### Overlay
 
-### Push-to-talk
+With `ui.overlay: true`, a small dark box in a corner of the screen shows the
+state, what you said, and the reply as it streams. It fades out 4 seconds
+after Jarvis goes idle. On Windows, clicks pass straight through it.
 
-Hold **F9**, speak, release. You'll hear a high beep when recording starts and
-a lower one when it stops. Taps shorter than 0.3 s are ignored. Press F9 while
-Jarvis is talking to cut it off and ask something else (barge-in). For risky
-actions Jarvis asks a yes/no question; hold F9 and answer. Ctrl+C quits and
-releases the mic and hotkey.
+## Start with Windows
 
-Replies start playing after the first sentence arrives: the streamed reply
-is split into sentences and each one goes to text-to-speech straight away,
-while the next is synthesised in the background.
+```powershell
+.venv\Scripts\python scripts\install_startup.py          # Task Scheduler (preferred)
+.venv\Scripts\python scripts\install_startup.py --status
+.venv\Scripts\python scripts\uninstall_startup.py        # remove it again
+```
 
-**Windows note on the hotkey:** the `keyboard` library works without admin
-rights for normal windows. If F9 does nothing while an *elevated* window
-(e.g. an admin terminal or Task Manager) is focused, either run Jarvis as
-administrator too, or set `hotkey_backend: pynput` in `config.yaml`.
+This creates a hidden Task Scheduler task named **"Jarvis Assistant"**. It
+runs `.venv\Scripts\pythonw.exe main.py --wake --tray` 30 seconds after you
+log in (so audio devices are ready), with no console window. If Task
+Scheduler isn't available, a registry Run key (`HKCU\...\Run\JarvisAssistant`)
+is used instead. `scripts\run_jarvis.bat` starts the same thing by hand.
 
-### Voice troubleshooting
+Only one Jarvis runs at a time. Starting a second one shows "Jarvis is
+already running" and exits. On launch you hear a chime and "Good morning,
+<name>. Jarvis online." (`startup.*`). Set `startup.auto_briefing: true` to
+also get the daily briefing on the first launch of each day.
 
-| Problem | Fix |
-|---|---|
-| "No microphone found" | Plug in a mic; check Settings > Privacy & security > Microphone > "Let desktop apps access your microphone" |
-| Wrong mic or speaker | `python main.py --list-devices`, then set `audio.input_device` / `audio.output_device` (index or part of the name) |
-| F9 does nothing | See the Windows note above, or change `hotkey` (e.g. `"right ctrl"`) |
-| Transcription slow | `stt.model: base.en` (or `tiny.en`) |
-| Wake word fires by itself | Raise `wake.threshold` to 0.6-0.7 (watch scores with `--debug`) |
-| Wake word misses you | Lower `wake.threshold` to 0.35-0.4; raise mic level in Windows Sound settings |
-| Cuts you off mid-sentence | Raise `vad.silence_timeout` to 1.3-1.5 |
-| Waits too long after you stop | Lower `vad.silence_timeout` to 0.7-0.8 |
-| Jarvis hears itself | Keep `audio.headphones: false` on speakers; raise `audio.echo_tail` to 0.5 |
-| "didn't catch that" a lot | Speak closer to the mic, hold the key a moment longer, or lower `stt.min_rms` |
-| GPU errors on startup | Jarvis falls back to CPU automatically; force it with `stt.device: cpu` |
-| No speech, text only | edge-tts needs internet. Jarvis keeps printing replies while it's offline |
-| Different voice | `edge-tts --list-voices`, then set `tts.voice` (e.g. `en-US-GuyNeural`) |
+## Offline mode
 
-## Example voice commands
+If Claude can't be reached at startup or mid-conversation, Jarvis says so
+once and keeps working for simple commands: the time and date, timers,
+volume, mute, play/pause/next, opening apps, screenshots and locking the PC.
+It retries every 30 seconds and tells you when it's back online.
 
-Say "Hey Jarvis" first (or hold F9). Inside the follow-up window you can skip it.
+## 40 example voice commands
 
 **PC control**
-1. "Open Chrome." / "Open Excel." (Start Menu names work too)
-2. "Close Notepad." *(asks you to confirm)*
-3. "Set the volume to 30." / "Mute." / "Unmute."
-4. "Turn the brightness down to 40 percent."
-5. "How's my computer doing?" (CPU, RAM, disk, battery)
-6. "Take a screenshot."
-7. "Lock my PC."
-8. "Shut down the computer." *(confirm; 30 s grace)* then "Cancel the shutdown."
+1. "Open Chrome."
+2. "Open Excel." (Start Menu names work)
+3. "Close Notepad." *(asks to confirm)*
+4. "Set the volume to 30."
+5. "Mute." / "Unmute."
+6. "Turn the brightness down to 40 percent."
+7. "How's my computer doing?"
+8. "Which apps are using the most memory?"
+9. "Take a screenshot."
+10. "Lock my PC."
+11. "Restart the computer." *(confirm; 30 s grace)*
+12. "Cancel the shutdown."
 
-**Files** (only inside `safe_roots`)
-9. "Find the invoice from March in my downloads."
-10. "What's on my desktop?"
-11. "Read me notes.txt from Documents."
-12. "Take a note: call the plumber on Monday."
-13. "Delete old-report.docx." *(confirm; goes to the Recycle Bin)*
+**Files** (inside your safe folders)
+13. "Find the invoice from March."
+14. "What's on my desktop?"
+15. "Show the newest files in Downloads."
+16. "Read me notes.txt from Documents."
+17. "Open the latest PDF in my downloads."
+18. "Take a note: call the plumber on Monday."
+19. "Delete old-report.docx." *(confirm; Recycle Bin)*
 
 **Web**
-14. "What's the weather like?" / "Will it rain in Pune tomorrow?"
-15. "What's in the news?" / "Any cricket news?"
-16. "Search the web for the latest Python release."
+20. "What's the weather like?"
+21. "Will it rain in Pune tomorrow?"
+22. "What's in the news?"
+23. "Any cricket news today?"
+24. "Search the web for the latest Python release."
+25. "Go to github.com."
 
 **Projects**
-17. "Open cs-events." (VS Code)
-18. "What's the git status of cs-events?"
-19. "Run npm test in cs-events." *(confirm; allowlisted programs only)*
-20. "Start the cs-events dev server." / "Stop the dev server."
+26. "Open cs-events."
+27. "What's the git status of cs-events?"
+28. "Run npm test in cs-events." *(confirm)*
+29. "Pull the latest changes for cs-events." *(confirm)*
+30. "Start the cs-events dev server." / "Stop the dev server."
 
 **Productivity**
-21. "Set a timer for 10 minutes for the pasta."
-22. "Remind me to call mom at 6 pm." / "What reminders do I have?"
-23. "Add renew passport to my to-do list." / "What's on my to-do list?" / "Mark passport as done."
-24. "Give me my daily briefing."
+31. "Set a timer for 10 minutes for the pasta."
+32. "Remind me to call mom at 6 pm."
+33. "What reminders do I have?"
+34. "Add renew passport to my to-do list."
+35. "What's on my to-do list?" / "Mark passport as done."
+36. "Give me my daily briefing."
 
 **Media, clipboard, memory**
-25. "Pause the music." / "Next track." / "Play lofi beats on YouTube." / "Open Spotify and search Arijit Singh."
-26. "Summarize what's on my clipboard."
-27. "Remember that my locker code is 4512." / "What's my locker code?" / "Forget my locker code." *(confirm)*
-28. "Do that again." (Jarvis checks your recent commands)
+37. "Pause the music." / "Next track."
+38. "Play lofi beats on YouTube." / "Open Spotify and search Arijit Singh."
+39. "Summarize what's on my clipboard."
+40. "Remember that my locker code is 4512." Later: "What's my locker code?" / "Forget my locker code." *(confirm)*
 
 ## Tools
 
-Each tool is one Python function with `@tool`. Run `python main.py --text`
-then `/tools` to list what's loaded. **Bold** = asks for confirmation first.
+**Bold** = asks for confirmation. `python main.py --text` then `/tools` lists what's loaded.
 
 | Module | Tools |
 |---|---|
-| `system_tools` | `open_app` (config aliases, then fuzzy Start Menu match, then PATH), **`close_app`**, `set_volume`, `get_volume`, `mute`, `unmute`, `set_brightness`, `lock_pc`, `system_stats`, `screenshot`, **`shutdown_pc`**, **`restart_pc`** (30 s delay), `cancel_shutdown` |
-| `file_tools` | `search_files` (≤ 20 results), `open_file` (refuses programs/scripts), `read_text_file` (size-capped), `create_note`, `list_folder`, **`delete_file`** (Recycle Bin only) |
-| `web_tools` | `web_search` (DuckDuckGo, top 5), `open_url`, `get_weather` (Open-Meteo, no key), `get_news` (your RSS feeds) |
-| `dev_tools` | `open_project`, **`run_command_in_project`** (allowlist + confirm), `git_status`, **`git_pull`** (fast-forward only), `start_dev_server` (new terminal window), `stop_dev_server` |
+| `system_tools` | `open_app`, **`close_app`**, `set_volume`, `get_volume`, `mute`, `unmute`, `set_brightness`, `lock_pc`, `system_stats`, `screenshot`, **`shutdown_pc`**, **`restart_pc`**, `cancel_shutdown` |
+| `file_tools` | `search_files`, `open_file`, `read_text_file`, `create_note`, `list_folder`, **`delete_file`** |
+| `web_tools` | `web_search`, `open_url`, `get_weather`, `get_news` |
+| `dev_tools` | `open_project`, **`run_command_in_project`**, `git_status`, **`git_pull`**, `start_dev_server`, `stop_dev_server` |
 | `productivity_tools` | `set_timer`, `set_reminder`, `list_reminders`, `cancel_reminder`, `add_todo`, `read_todos`, `complete_todo`, `daily_briefing` |
 | `media_tools` | `play_pause`, `next_track`, `previous_track`, `media_volume`, `search_youtube`, `open_spotify` |
-| `clipboard_tools` | `read_clipboard`, `write_clipboard`, `summarize_clipboard` (2-sentence summary by Claude) |
+| `clipboard_tools` | `read_clipboard`, `write_clipboard`, `summarize_clipboard` |
 | `memory_tools` | `remember`, `recall`, **`forget`**, `list_memories`, `recent_commands` |
 
-At most **6 tool calls per request** (`llm.max_tool_calls`) to stop loops. If
-a tool fails, the model gets a short error message and explains it in plain
-words; it's told never to claim success unless the tool reported it.
+At most 6 tool calls run per request (`llm.max_tool_calls`). If a tool fails,
+Claude gets a short error and explains it; it never claims success unless the
+tool reported it.
 
-## Memory
+## Add a tool in 5 lines
 
-Everything lives in one SQLite file, `data/jarvis.db`:
-
-- **facts**: "remember that my wifi password is ...". Before every request,
-  the 5 facts with the most keyword overlap with what you said are added to
-  Claude's instructions. `recall` also matches typos ("wi fi pasword").
-- **preferences**: "remember that I prefer Celsius" (saved as a preference)
-  are always included.
-- **command_history**: your last 200 requests and the tools they used, for
-  "do that again".
-- **todos** and **reminders**: reminders and timers fire with a spoken
-  message plus a Windows notification. They're stored, so a reminder set
-  before a restart still fires afterwards. Anything that came due while
-  Jarvis was off is announced as "missed" at the next start.
-
-## Safety gate
-
-- **Confirmation:** tools marked `dangerous=True` make Jarvis say what it's about to do
-  ("I'm about to delete report.docx. It goes to the Recycle Bin. Confirm?")
-  and wait 8 s (`safety.confirm_timeout`) for an answer, spoken or typed in
-  text mode. "Yes", "yeah", "confirm", "do it" and "go ahead" approve. "No",
-  "cancel", "stop", "don't", anything unclear, or silence mean no.
-- **Shell commands** (`run_command_in_project`):
-  - **Denylist:** always blocked, whatever you answer. This covers
-    `format`, `del /s`, `rd /s`, `rm -rf`, `shutdown`, `reg delete`,
-    `diskpart`, `bcdedit` and similar, plus anything that mentions system
-    folders (`C:\Windows`, `System32`, `Program Files`, `ProgramData`,
-    a bare drive root).
-  - **One command at a time:** chaining (`&&`, `;`, `|`), redirection
-    (`>`) and substitution are blocked too.
-  - **Allowlist:** the first word must be on `safety.shell_allowlist`
-    (default `git, npm, npx, python, pip, node, ls, dir`). Anything else is
-    blocked with a spoken explanation.
-  - **Allowlisted commands still ask first**, unless you set
-    `safety.auto_approve_allowlist: true`.
-- **File tools** are confined to `safe_roots`. `..`, symlinks, drive paths
-  and absolute paths elsewhere are rejected before anything is touched.
-- **Audit log:** every tool call is written to `logs/tool_calls.log` as one
-  JSON line: time, tool, arguments, whether you confirmed, whether it was
-  blocked, and the result. The log rotates at 1 MB and keeps 5 old files.
-
-## Config reference (`config.yaml`)
-
-| Setting | What it does |
-|---|---|
-| `apps` | Spoken name -> program for `open_app` (`chrome: chrome.exe`) |
-| `safe_roots` | The only folders file tools may touch |
-| `notes_dir`, `screenshots_dir` | Where notes and screenshots go |
-| `projects` | `name: {path, dev_command}` for the dev tools |
-| `weather` | Default `city`, `lat`, `lon`, `units` |
-| `news_feeds` | RSS feed URLs for `get_news` and the briefing |
-| `briefing.include` | Any of `weather, news, todos, reminders` |
-| `safety.*` | `confirm_dangerous`, `confirm_timeout`, `shell_allowlist`, `auto_approve_allowlist` |
-| `llm.max_tool_calls` | Tool calls allowed per request (default 6) |
-| `tools.disabled` / `tools.disabled_modules` | Hide tools from the model without code changes |
-| `tools.folders` | Spoken folder names ("downloads") for file tools |
-| `wake.*`, `vad.*`, `follow_up.*`, `audio.*`, `stt.*`, `tts.*` | Voice settings (see the sections above) |
-
-## Adding a tool
-
-Write one function anywhere in `tools/` (a new file works too) with type hints and a docstring. That's it:
+Create any file in `tools\`, for example `tools\my_tools.py`:
 
 ```python
 from tools import tool
 
 @tool
-def flip_coin(times: int = 1) -> str:
-    """Flip a coin and report the results.
-
-    Args:
-        times: How many flips.
-    """
-    import random
-    return ", ".join(random.choice(["heads", "tails"]) for _ in range(times))
+def flip_coin() -> str:
+    """Flip a coin and say heads or tails."""
+    import random; return random.choice(["Heads.", "Tails."])
 ```
 
-The decorator builds the JSON schema from the type hints (`str`, `int`,
-`float`, `bool`, `list[str]`, `Optional[...]`, `Literal[...]`) and the
-description from the docstring (the `Args:` section becomes parameter
-descriptions). For anything destructive use
-`@tool(dangerous=True, summary="delete {path}")`, so Jarvis says "I'm about to
-delete report.docx. Confirm?" first. A tool that runs shell commands declares
-`shell_arg="command"` so the denylist/allowlist applies. Tools can reach
-memory with `get_memory()`, settings with `setting("key")`, and speak later
-with `notify("...")`. Disable tools without code changes via
-`tools.disabled` / `tools.disabled_modules` in `config.yaml`.
+Restart Jarvis and say "Flip a coin". That's all: the decorator builds the
+schema from the type hints and docstring. See
+[docs/ADDING_TOOLS.md](docs/ADDING_TOOLS.md) for arguments, settings,
+confirmations and tests.
 
-## Files and logs
+## Configuration reference (`config.yaml`)
 
-- `config.yaml` - all settings; `.env` - your API key only.
-- `logs/jarvis.log` - main log (rotating).
-- `logs/tool_calls.log` - one JSON line per tool call (rotating).
-- `data/jarvis.db` - memory, command history, todos and reminders.
-- Transcription times are logged ("Transcribed 2.1s of audio in 0.45s").
+Secrets live in `.env` (`ANTHROPIC_API_KEY=...`); everything else is in
+`config.yaml`. Every value is checked when Jarvis starts. A typo like
+`silense_timeout` or a value out of range stops it with a clear message.
 
-## Defaults chosen (change in `config.yaml`)
+| Section | Settings |
+|---|---|
+| `assistant` | `name`, `user_name` (how Jarvis addresses you) |
+| `llm` | `model` (`claude-sonnet-5-5`), `effort` (`low`…`max`), `max_tokens`, `max_history_turns` (10), `max_tool_rounds`, `max_tool_calls` (6), `request_timeout_s`, `max_retries`, `refusal_fallback` |
+| `tools` | `timeout_s`, `disabled` (tool names), `disabled_modules`, `folders` (spoken folder names) |
+| `apps` | Spoken name -> program for `open_app` |
+| `safe_roots` | The only folders file tools may touch |
+| `notes_dir`, `screenshots_dir` | Where notes and screenshots are saved |
+| `projects` | `name: {path, dev_command}` |
+| `weather` | `city`, `lat`, `lon`, `units` |
+| `news_feeds` | RSS feed URLs |
+| `briefing.include` | `weather`, `news`, `todos`, `reminders` |
+| `safety` | `confirm_dangerous`, `confirm_timeout` (8 s), `shell_allowlist`, `auto_approve_allowlist` |
+| `audio` | `input_device`, `output_device` (index or name part), `sample_rate`, `min_press_s`, `beeps`, `headphones`, `echo_tail` |
+| `hotkey`, `hotkey_backend` | Push-to-talk key (`f9`) and library (`auto`/`keyboard`/`pynput`) |
+| `wake` | `model` (`hey_jarvis` or a .onnx path), `threshold` (0.5), `cooldown`, `listen_timeout` |
+| `vad` | `engine` (`silero`/`energy`), `threshold`, `silence_timeout` (1.0), `max_utterance`, `min_speech`, `preroll` |
+| `follow_up` | `enabled`, `window` (6 s) |
+| `barge_in.min_speech` | Talk this long over Jarvis to interrupt (headphones mode) |
+| `stt` | `model` (`small.en`), `device`, `compute_type`, `beam_size`, `download_root`, `min_rms` |
+| `tts` | `engine` (`edge`), `voice`, `rate`, `volume`, `filler`, `filler_delay`, `fillers` |
+| `ui` | `tray`, `overlay`, `overlay_position`, `overlay_fade_s` |
+| `startup` | `chime`, `greeting`, `time_greeting`, `auto_briefing` |
+| `paths` | `logs_dir`, `data_dir` |
+| `logging.level` | `DEBUG`/`INFO`/`WARNING`/`ERROR` |
 
-- Model `claude-sonnet-5-5` at effort `low` for snappy spoken replies; raise
-  `llm.effort` to `medium` if answers feel shallow.
-- Last 10 exchanges kept as context (`llm.max_history_turns`).
-- `llm.refusal_fallback: true` - if the model declines a request, the API
-  retries it on a fallback model inside the same call.
-- Jarvis calls you "sir" until you set `assistant.user_name`.
-- Tool calls time out after 30 s (`tools.timeout_s`).
-- Voice: Whisper `small.en` with greedy decoding (`stt.beam_size: 1`) for
-  speed, on your GPU if CUDA works, otherwise CPU int8. Voice
-  `en-GB-RyanNeural` via edge-tts. F9 push-to-talk.
-- Confirmations: anything other than a clear "yes" (including 8 seconds of
-  silence) counts as "no".
-- Wake word `hey_jarvis` at threshold 0.5 with a 1.5 s cooldown. Plain
-  "Jarvis" would need a custom-trained model (`wake.model` accepts a path to
-  one).
-- Voice detection: Silero VAD (bundled with faster-whisper) with an energy
-  fallback; 1.0 s silence ends a request, 15 s maximum, 0.5 s pre-roll.
-- Follow-up window 6 s. Exit phrases ("thanks", "that's all", "stop
-  listening", "no", ...) are answered locally, with no API call.
-- Speakers assumed (`audio.headphones: false`), so voice barge-in is off.
-- File tools limited to Documents, Downloads and Desktop; notes go to
-  `Documents\Jarvis Notes`, screenshots to `Pictures\Jarvis Screenshots`.
-- Shell allowlist `git, npm, npx, python, pip, node, ls, dir`, always asking
-  first. Note that `python` and `node` can run any script, so keep the
-  confirmation on.
-- Web search uses the `ddgs` package, the current name of `duckduckgo-search`.
-- Weather defaults to Chhatrapati Sambhajinagar in Celsius.
+## Files
+
+| Path | Contents |
+|---|---|
+| `.env` | Your API key (never committed) |
+| `config.yaml` | All settings |
+| `logs\jarvis.log` | Main log, rotating (5 files × 2 MB) |
+| `logs\tool_calls.log` | One JSON line per tool call: arguments, confirmation, result |
+| `data\jarvis.db` | Memory, command history, to-dos, reminders (SQLite) |
+| `data\jarvis.lock` | Single-instance lock |
+
+## Troubleshooting
+
+| Problem | Fix |
+|---|---|
+| Anything at all | `python main.py --check`, then look at `logs\jarvis.log` |
+| "No microphone found" | Settings > Privacy & security > Microphone > allow desktop apps; plug the mic in before starting |
+| Wrong mic or speakers | `--list-devices`, then `--setup` or set `audio.input_device` / `output_device` |
+| F9 does nothing | The `keyboard` library needs no admin for normal windows, but an elevated window (admin terminal, Task Manager) swallows keys: run Jarvis as admin too, or set `hotkey_backend: pynput`. Or pick another `hotkey` |
+| Wake word fires by itself | Raise `wake.threshold` to 0.6-0.7 (watch `[wake]` scores with `--debug`) |
+| Wake word misses you | Lower `wake.threshold` to 0.35-0.4; raise mic level in Windows Sound settings (~75%) |
+| Cuts you off mid-sentence | Raise `vad.silence_timeout` to 1.3-1.5 |
+| Waits too long after you stop | Lower `vad.silence_timeout` to 0.7-0.8 |
+| Jarvis hears itself (echo) | On speakers keep `audio.headphones: false` (listening pauses while it talks) and raise `audio.echo_tail` to 0.5; or use headphones and set it to `true` |
+| Transcription slow | `stt.model: base.en`; with an NVIDIA GPU, `stt.device: cuda` |
+| No voice, text only | edge-tts needs internet; `--check` shows the Text-to-speech line |
+| "Jarvis is already running" | Quit it from the tray. If no tray icon is visible, end `pythonw.exe` in Task Manager |
+| Dark red icon that won't clear | It crashed 5 times in 10 minutes: Open logs folder, fix the cause, Restart Jarvis |
+| Doesn't start at login | `install_startup.py --status`; Task Scheduler > "Jarvis Assistant" > History |
+
+## Security notes
+
+- **The API key** stays in `.env` and is only sent to Anthropic.
+- **What Claude sees:** your spoken requests, tool results (file contents you
+  ask about, clipboard text you ask to summarise, search results) and the
+  facts Jarvis selects from memory. Don't ask it to read secrets aloud.
+- **Shell commands:** only allowlisted programs, one at a time, never
+  chaining or redirection, and denylisted commands never run. `python` and
+  `node` can run any script, so keep `auto_approve_allowlist: false`.
+- **File tools** can't leave `safe_roots`, can't open executables or
+  scripts, and delete only to the Recycle Bin.
+- **Content isn't instructions:** text read from files, the clipboard or web
+  pages is treated as data, but prompt injection is never impossible. The
+  confirmation prompt is the backstop, so read it before saying yes.
+- **Audit log:** `logs\tool_calls.log` records everything Jarvis did.
+- **Memory** is stored unencrypted in `data\jarvis.db`. Don't store
+  passwords you wouldn't write in a text file.
+
+## Development
+
+```powershell
+python -m pytest              # ~280 tests, no microphone or API key needed
+python main.py --text         # exercise the agent and tools by typing
+```
+
+The architecture, conventions and the "how to add things" rules are in
+[CLAUDE.md](../CLAUDE.md). Building a standalone .exe:
+[build_exe.md](build_exe.md).
+
+## Roadmap
+
+- A custom-trained **"Jarvis"** wake word (no "hey").
+- **Gmail and Google Calendar** tools via MCP ("what's my next meeting?").
+- **Screen understanding**: "what's this error on my screen?" via a screenshot and vision.
+- A **local LLM fallback** (e.g. Ollama) for smarter offline mode.
+- A **mobile remote**: talk to your PC Jarvis from your phone.
+- Piper (offline) and ElevenLabs voices (the stubs are already in `core/tts.py`).

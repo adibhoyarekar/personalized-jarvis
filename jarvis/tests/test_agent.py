@@ -139,8 +139,11 @@ def test_api_errors_become_spoken_messages(config, tmp_path: Path) -> None:
     reply = agent.ask("hello?", on_text=spoken.append)
     assert reply.error and "internet" in reply.text
     assert spoken == [reply.text]
+    assert not agent.online
     # History stays valid: the next request starts with a user message and alternates.
+    agent.offline_retry_s = 0  # retry the API straight away
     agent.ask("again")
+    assert agent.online
     roles = [m["role"] for m in client.requests[-1]["messages"]]
     assert roles == ["user", "assistant", "user"]
 
@@ -233,3 +236,21 @@ def test_tool_exception_becomes_short_error(config, tmp_path: Path) -> None:
     agent.ask("open report")
     result = client.requests[1]["messages"][-1]["content"][0]
     assert result["is_error"] and result["content"] == "Error: No such file: C:/x/report.docx"
+
+
+def test_offline_mode_handles_simple_commands_locally(config, tmp_path: Path) -> None:
+    request = httpx.Request("POST", "https://api.anthropic.com/v1/messages")
+    client = FakeClient([anthropic.APIConnectionError(request=request)])
+    agent = make_agent(config, client, tmp_path)
+    lost: list[bool] = []
+    agent.on_connection_lost = lambda: lost.append(True)
+    spoken: list[str] = []
+    reply = agent.ask("what time is it?", on_text=spoken.append)
+    assert lost == [True] and not agent.online
+    assert reply.text.startswith("It's ") and not reply.error  # answered locally
+    # While offline, local commands never touch the API...
+    reply = agent.ask("Jarvis, what's the time")
+    assert reply.text.startswith("It's ") and len(client.requests) == 1
+    # ...and anything else gets a short explanation instead of a long timeout.
+    reply = agent.ask("write me a poem about the sea")
+    assert reply.error and "simple things" in reply.text and len(client.requests) == 1

@@ -83,10 +83,14 @@ def resolve_device(spec: Any, kind: str) -> int | None:
         try:
             sd.query_devices(kind=kind)
         except Exception as exc:  # noqa: BLE001 - PortAudioError/ValueError
-            noun = "microphone" if kind == "input" else "speaker/headphones"
+            if kind == "input":
+                hint = "check Settings > Privacy & security > Microphone"
+                noun = "microphone"
+            else:
+                hint = "check Settings > System > Sound > Output"
+                noun = "speaker or headphones"
             raise AudioError(
-                f"No {noun} found. Plug one in, check Windows privacy settings "
-                "(Settings > Privacy > Microphone), or run: python main.py --list-devices"
+                f"No {noun} found. Plug one in, {hint}, or run: python main.py --list-devices"
             ) from exc
         return None
     if isinstance(spec, int) or (isinstance(spec, str) and spec.strip().isdigit()):
@@ -213,6 +217,11 @@ class MicRecorder:
     def add_listener(self, listener: FrameListener) -> None:
         """Receive every mic frame (at ``sample_rate``), e.g. for wake-word detection."""
         self._listeners.append(listener)
+
+    def remove_listener(self, listener: FrameListener) -> None:
+        """Stop sending frames to ``listener`` (no-op if it isn't registered)."""
+        if listener in self._listeners:
+            self._listeners.remove(listener)
 
     def _callback(self, indata: np.ndarray, frames: int, time_info: Any, status: Any) -> None:
         if status:
@@ -609,6 +618,23 @@ class WakeWordError(RuntimeError):
     """The wake word model could not be loaded."""
 
 
+def wake_model_files_present(model: str) -> bool:
+    """True if a built-in openWakeWord model (and its feature models) is downloaded,
+    or ``model`` is a path to an existing file."""
+    import os
+
+    if model.endswith((".onnx", ".tflite")) or os.sep in model or "/" in model:
+        return os.path.isfile(model)
+    import openwakeword
+
+    if model not in openwakeword.MODELS:
+        return False
+    needed = [openwakeword.MODELS[model]["model_path"]] + [
+        m["model_path"] for m in openwakeword.FEATURE_MODELS.values()
+    ]
+    return all(os.path.isfile(p.replace(".tflite", ".onnx")) for p in needed)
+
+
 class WakeWordDetector:
     """openWakeWord model fed 80 ms frames, with a threshold and cooldown.
 
@@ -651,10 +677,7 @@ class WakeWordDetector:
             if model not in openwakeword.MODELS:
                 choices = ", ".join(sorted(openwakeword.MODELS))
                 raise WakeWordError(f"Unknown wake word '{model}'. Built-in choices: {choices}")
-            needed = [openwakeword.MODELS[model]["model_path"]] + [
-                m["model_path"] for m in openwakeword.FEATURE_MODELS.values()
-            ]
-            if not all(os.path.isfile(p.replace(".tflite", ".onnx")) for p in needed):
+            if not wake_model_files_present(model):
                 print(f"Downloading wake word model '{model}' (a few MB, first run only)...", flush=True)
                 try:
                     download_models(model_names=[model])
@@ -786,7 +809,11 @@ class AudioPipeline:
         self._thread.start()
 
     def stop(self) -> None:
+        """Stop the thread and detach from the microphone (it may be reused by a new pipeline)."""
         self._stop.set()
+        remove = getattr(self.recorder, "remove_listener", None)
+        if remove is not None:
+            remove(self._on_frame)
         if self._thread is not None:
             self._thread.join(timeout=2)
             self._thread = None
