@@ -196,7 +196,7 @@ class VoiceApp:
         debug: Print state changes and wake word scores.
         tray: Show the system tray icon.
         overlay: Show the on-screen overlay (None = use ``ui.overlay`` from config).
-        window: Show the desktop window (None = use ``ui.window`` from config).
+        window: Show the HUD window (None = use ``ui.window`` from config).
         start_hidden: Start with the window hidden in the tray (ignored without a tray).
         argv: Command line to reuse when restarting.
         print_fn: Console output (pythonw has no console; print then does nothing).
@@ -381,10 +381,6 @@ class VoiceApp:
 
             self.state.subscribe(debug_state_printer(self.print))
         try:
-            if self.use_window or self.use_tray:
-                from ui.window import prepare_windows_process
-
-                prepare_windows_process()  # before the first window, tray included
             if self.use_tray:
                 self._start_tray()
             if self.use_window:
@@ -485,6 +481,7 @@ class VoiceApp:
             assistant.reply_listeners.append(self.window.on_reply)
             assistant.reply_done_listeners.append(self.window.on_reply_done)
             assistant.notice_listeners.append(self.window.on_notice)
+            assistant.status_listeners.append(self.window.on_status)
         if self.muted:
             assistant.set_muted(True)
         self.runtime.agent.gate.confirm = assistant.confirm
@@ -551,11 +548,12 @@ class VoiceApp:
     def _start_window(self) -> None:
         try:
             from core.single_instance import ShowRequests
-            from ui.window import JarvisWindow
+            from ui.hud import HudWindow
 
-            self.window = JarvisWindow(
+            self.window = HudWindow(
                 self,
                 name=str(self.config.get("assistant.name", "Jarvis")),
+                user_name=str(self.config.get("assistant.user_name", "") or ""),
                 hotkey=str(self.config.get("hotkey", "f9") or ""),
                 start_hidden=self.start_hidden and self.tray is not None,
                 level=lambda: self._mic_rms,

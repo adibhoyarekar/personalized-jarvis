@@ -138,13 +138,25 @@ speakers, so interrupting by voice needs headphones.
 | Interrupt with F9 | Yes | Yes |
 | Risk of Jarvis hearing itself | None (the first 0.3 s after it stops is ignored too) | High if you're really on speakers |
 
-### Desktop window
+### The HUD (desktop window)
 
-Voice mode opens a dark window with an animated orb that shows what Jarvis is
-doing: cyan on standby, green while listening (it moves with your voice), violet
-while thinking, blue while speaking, red when the mic is off. Under it is the
-conversation, and at the bottom a box to type a message (Enter sends it, and it
-interrupts a reply like F9 does) plus a mic button to turn the microphone off.
+Voice mode opens the J.A.R.V.I.S. HUD: a full-screen-style heads-up display with
+an animated arc-reactor core, live system diagnostics (CPU, memory, network,
+storage, power, uptime), the conversation as it streams, an event log of what
+Jarvis is doing, and a command line. The whole display changes colour with the
+state: cyan on standby, aqua while listening (the spectrum ring follows your
+voice), amber while processing, blue while responding, red when the mic is off
+or something failed.
+
+It is drawn by Microsoft Edge (built into Windows) in app mode, so it is a
+plain window with no browser bars, and the animation runs on the graphics card.
+If the PC can't keep up, the HUD lowers its own detail automatically. Chrome or
+Brave are used if Edge is missing. The page is served only to this PC
+(127.0.0.1) and every request needs a random per-run key.
+
+- Type a command and press Enter (it interrupts a reply like F9 does), or use
+  the quick buttons (status report, weather, briefing, news, tasks).
+- The mic button or **Ctrl+M** turns the microphone off and on.
 
 - **X (close)** hides the window; Jarvis keeps running in the tray. Click the
   tray icon (or "Open Jarvis" in its menu) to bring the window back.
@@ -153,7 +165,8 @@ interrupts a reply like F9 does) plus a mic button to turn the microphone off.
   window forward instead of starting a second copy.
 - Without a tray icon (`--no-tray`), closing the window quits.
 
-Turn it off with `ui.window: false` or `--no-window`.
+Turn it off with `ui.window: false` or `--no-window`. The HUD's browser cache
+lives in `%LOCALAPPDATA%\Jarvis\hud-browser`.
 
 ### Overlay
 

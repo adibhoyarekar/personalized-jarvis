@@ -143,6 +143,8 @@ class VoiceAssistant:
         self.reply_listeners: list[Callable[[str], None]] = []
         self.reply_done_listeners: list[Callable[[], None]] = []
         self.notice_listeners: list[Callable[[str], None]] = []
+        #: Agent progress: ``(state, detail)``, e.g. ``("tool", "web_search")``.
+        self.status_listeners: list[Callable[[str, str], None]] = []
         self.ptt: PushToTalk | None = None
         if self.settings.hotkey:
             self.ptt = PushToTalk(
@@ -397,6 +399,7 @@ class VoiceAssistant:
             self._notify(self.reply_listeners, chunk)
 
         def on_status(state: str, detail: str) -> None:
+            self._notify(self.status_listeners, state, detail)
             if state == "tool":
                 log.info("Running tool %s", detail)
                 if filler is not None:

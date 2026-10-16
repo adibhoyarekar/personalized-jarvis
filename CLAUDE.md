@@ -49,7 +49,7 @@ jarvis/
     checks.py           --check; setup_wizard.py + config_editor.py for --setup
     startup.py          Task Scheduler XML / Run key (scripts/ call this)
   tools/                every module is auto-discovered; _-prefixed modules are helpers
-  ui/                   window.py (main window, tkinter thread), tray.py (pystray), overlay.py
+  ui/                   hud.py (HUD server + Edge app window) with hud/ (HTML/CSS/JS), tray.py, overlay.py
   scripts/              install_startup.py, uninstall_startup.py, run_jarvis.bat
   tests/                pytest; fakes for the API client, audio and TTS live in conftest/test_voice
 ```
@@ -81,8 +81,8 @@ jarvis/
   TTS, tray, window, overlay, scheduler and connectivity monitor are background
   threads that talk to it through queues, events, or thread-safe methods
   (`VoiceAssistant.stop/set_muted/set_wake_active/submit_text`, `StateManager.set`).
-  Never block the PortAudio callback. tkinter objects must be created and freed
-  on their own thread (`ui/window.py` collects garbage there before exiting).
+  Never block the PortAudio callback. The HUD is a loopback web page fed over
+  Server-Sent Events; every request needs its per-run token and a loopback Host.
 - **Config:** read with `config.get("section.key", default)`. A new setting
   needs a default in code, an entry in `config.yaml` with a comment, a field
   in `core/config_schema.py` (sections forbid unknown keys), and a README row.

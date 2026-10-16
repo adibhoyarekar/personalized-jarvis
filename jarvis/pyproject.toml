@@ -54,6 +54,9 @@ jarvisw = "main:main"   # no console window (like pythonw)
 py-modules = ["main"]
 packages = ["core", "tools", "ui"]
 
+[tool.setuptools.package-data]
+ui = ["hud/*"]
+
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests"]

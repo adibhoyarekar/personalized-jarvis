@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>J.A.R.V.I.S.</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Ccircle cx='32' cy='32' r='29' fill='%23010409' stroke='%2300e5ff' stroke-width='3'/%3E%3Ccircle cx='32' cy='32' r='19' fill='none' stroke='%2300e5ff' stroke-width='5' stroke-dasharray='9 3'/%3E%3Ccircle cx='32' cy='32' r='9' fill='%23bff7ff'/%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Orbitron:wght@500;700;900&family=Rajdhani:wght@500;600;700&family=Share+Tech+Mono&display=swap">
+<link rel="stylesheet" href="/hud.css">
+</head>
+<body data-look="starting">
+<canvas id="fx" aria-hidden="true"></canvas>
+<div class="vignette" aria-hidden="true"></div>
+<div class="scanlines" aria-hidden="true"></div>
+
+<div id="boot" aria-hidden="true">
+  <div class="boot-inner">
+    <div class="boot-logo" data-text="J.A.R.V.I.S.">J.A.R.V.I.S.</div>
+    <div class="boot-sub">NEURAL INTERFACE // BUILD 2045.10</div>
+    <pre id="boot-log"></pre>
+    <div class="boot-bar"><i></i></div>
+  </div>
+</div>
+
+<main id="hud">
+  <header class="topbar">
+    <div class="brand">
+      <svg class="brand-mark" viewBox="0 0 64 64" aria-hidden="true">
+        <circle cx="32" cy="32" r="29" class="bm-ring"/>
+        <circle cx="32" cy="32" r="20" class="bm-seg"/>
+        <circle cx="32" cy="32" r="8" class="bm-core"/>
+      </svg>
+      <div>
+        <div class="brand-name" id="brand">J.A.R.V.I.S.</div>
+        <div class="brand-sub">JUST A RATHER VERY INTELLIGENT SYSTEM</div>
+      </div>
+    </div>
+    <div class="chips">
+      <div class="chip" id="chip-link"><i></i><span>UPLINK</span><b>BOOTING</b></div>
+      <div class="chip" id="chip-mic"><i></i><span>AUDIO</span><b>ACTIVE</b></div>
+      <div class="chip" id="chip-mode"><i></i><span>MODE</span><b>WAKE</b></div>
+    </div>
+    <div class="clock">
+      <div class="clock-time" id="clock-time">00:00:00</div>
+      <div class="clock-date" id="clock-date">-</div>
+    </div>
+  </header>
+
+  <aside class="panel diag">
+    <div class="panel-head"><span>SYS.DIAGNOSTICS</span><em class="blink">LIVE</em></div>
+    <div class="gauges">
+      <div class="gauge" id="g-cpu"><canvas></canvas><div class="g-val"><b>--</b><small>%</small></div><div class="g-label">CPU</div></div>
+      <div class="gauge" id="g-mem"><canvas></canvas><div class="g-val"><b>--</b><small>%</small></div><div class="g-label">MEMORY</div></div>
+    </div>
+    <div class="metric">
+      <div class="m-row"><span>CPU LOAD // 60S</span><b id="v-ghz">-</b></div>
+      <canvas class="spark" id="spark-cpu"></canvas>
+    </div>
+    <div class="metric">
+      <div class="m-row"><span>NET DOWN</span><b id="v-down">-</b></div>
+      <div class="m-row"><span>NET UP</span><b id="v-up">-</b></div>
+      <canvas class="spark" id="spark-net"></canvas>
+    </div>
+    <div class="metric">
+      <div class="bar-row"><span>STORAGE</span><div class="bar"><i id="b-disk"></i></div><b id="v-disk">-</b></div>
+      <div class="bar-row"><span>MEMORY</span><div class="bar"><i id="b-mem"></i></div><b id="v-mem">-</b></div>
+      <div class="bar-row"><span>POWER</span><div class="bar"><i id="b-bat"></i></div><b id="v-bat">-</b></div>
+    </div>
+    <div class="kv">
+      <div><span>UPTIME</span><b id="v-uptime">-</b></div>
+      <div><span>PROCESSES</span><b id="v-procs">-</b></div>
+      <div><span>CORES</span><b id="v-cores">-</b></div>
+      <div><span>SESSION</span><b id="v-session">00:00:00</b></div>
+    </div>
+    <div class="hexdump" id="hexdump" aria-hidden="true"></div>
+  </aside>
+
+  <section class="core">
+    <canvas id="reactor" aria-hidden="true"></canvas>
+    <div class="readout tl"><span>AZIMUTH</span><b id="ro-az">000.0&deg;</b><span>ELEVATION</span><b id="ro-el">00.00&deg;</b></div>
+    <div class="readout tr"><span>SIGNAL</span><b id="ro-sig">-60 DB</b><span>SAMPLE RATE</span><b>16.0 KHZ</b></div>
+    <div class="readout bl"><span>PACKETS</span><b id="ro-pkt">000000</b><span>NODE</span><b>LOOPBACK/127</b></div>
+    <div class="readout br"><span>CORE CYCLE</span><b id="ro-cyc">0000</b><span>INTEGRITY</span><b id="ro-int">100.0%</b></div>
+    <div class="state">
+      <div class="state-label" id="state-label">INITIALIZING</div>
+      <div class="state-hint" id="state-hint">Warming up speech recognition</div>
+    </div>
+  </section>
+
+  <aside class="panel comms">
+    <div class="panel-head"><span>COMMS.TRANSCRIPT</span><em id="msg-count">000</em></div>
+    <div class="feed" id="feed"><div class="feed-empty">AWAITING INPUT<span class="caret"></span></div></div>
+  </aside>
+
+  <section class="panel log">
+    <div class="panel-head"><span>EVENT.LOG</span><em class="blink rec">REC</em></div>
+    <div class="log-lines" id="log"></div>
+  </section>
+
+  <section class="console">
+    <form class="cmd" id="cmd" autocomplete="off">
+      <button type="button" class="mic" id="mic" title="Microphone on/off (Ctrl+M)" aria-label="Toggle microphone">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21M8.5 21h7"/><path class="slash" d="M4 20 20 4"/></svg>
+      </button>
+      <label class="cmd-box">
+        <span class="prompt">JARVIS://</span>
+        <input id="input" maxlength="2000" spellcheck="false" placeholder="ENTER COMMAND">
+        <span class="cmd-key">ENTER</span>
+      </label>
+      <button type="submit" class="exec"><span>EXECUTE</span></button>
+    </form>
+    <div class="quick" id="quick">
+      <button type="button" data-say="Give me a quick system status report.">STATUS REPORT</button>
+      <button type="button" data-say="What's the weather like right now?">WEATHER</button>
+      <button type="button" data-say="Give me my daily briefing.">DAILY BRIEFING</button>
+      <button type="button" data-say="What's in the news today?">NEWS</button>
+      <button type="button" data-say="What's on my to-do list?">TASKS</button>
+    </div>
+  </section>
+</main>
+
+<div id="offline" hidden>
+  <div class="off-inner"><div class="off-title">CONNECTION TERMINATED</div><div class="off-sub">J.A.R.V.I.S. // OFFLINE</div></div>
+</div>
+
+<script src="/hud.js"></script>
+</body>
+</html>
