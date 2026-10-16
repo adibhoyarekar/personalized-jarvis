@@ -7,7 +7,9 @@ assistant:
   user_name: ""            # how Jarvis addresses you, e.g. "Aditya" (empty = "sir")
 
 llm:
+  provider: anthropic       # anthropic (Claude, paid) | gemini (Google, free tier; key in GEMINI_API_KEY)
   model: claude-sonnet-5-5
+  gemini_model: gemini-flash-latest   # used when provider is gemini, e.g. gemini-2.5-flash
   max_tokens: 16000         # cap on thinking + reply per request
   effort: low               # low | medium | high - low keeps voice replies snappy
   max_history_turns: 10     # user/assistant exchanges kept as context

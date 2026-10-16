@@ -26,7 +26,9 @@ class Assistant(_Section):
 
 
 class LLM(_Section):
+    provider: Optional[Literal["anthropic", "gemini"]] = None
     model: Optional[str] = None
+    gemini_model: Optional[str] = None
     max_tokens: Optional[int] = Field(None, ge=256, le=128_000)
     effort: Optional[Literal["low", "medium", "high", "xhigh", "max"]] = None
     max_history_turns: Optional[int] = Field(None, ge=0, le=100)

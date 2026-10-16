@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
+from core.agent import DEFAULT_GEMINI_MODEL, gemini_api_key, llm_provider
 from core.config import Config, resolve_path
 
 PASS, WARN, FAIL, SKIP = "PASS", "WARN", "FAIL", "SKIP"
@@ -28,6 +29,28 @@ class CheckResult:
 
 def _api_key() -> str | None:
     return os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN")
+
+
+def _gemini_ping(config: Config) -> str:
+    import openai
+
+    from core.agent import DEFAULT_GEMINI_MODEL, GEMINI_BASE_URL, gemini_api_key
+
+    model = config.get("llm.gemini_model", DEFAULT_GEMINI_MODEL)
+    try:
+        client = openai.OpenAI(api_key=gemini_api_key(), base_url=GEMINI_BASE_URL, timeout=10, max_retries=0)
+        client.models.retrieve(model)
+        return "ok"
+    except openai.APIConnectionError:
+        return "offline"
+    except (openai.AuthenticationError, openai.PermissionDeniedError):
+        return "auth"
+    except openai.NotFoundError:
+        return "model"
+    except openai.BadRequestError as exc:
+        return "auth" if "API key" in str(exc) or "API_KEY" in str(exc) else f"error: {exc}"
+    except Exception as exc:  # noqa: BLE001
+        return f"error: {exc}"
 
 
 def _api_ping(config: Config) -> str:
@@ -99,6 +122,8 @@ class Probes:
 
     api_key: Callable[[], str | None] = _api_key
     api_ping: Callable[[Config], str] = _api_ping
+    gemini_key: Callable[[], str | None] = gemini_api_key
+    gemini_ping: Callable[[Config], str] = _gemini_ping
     device: Callable[[Config, str], str] = _device
     whisper_cached: Callable[[Config], bool] = _whisper_cached
     wake_present: Callable[[Config], bool] = _wake_present
@@ -122,26 +147,33 @@ def collect_checks(config: Config, probes: Probes | None = None) -> list[CheckRe
     p = probes or Probes()
     results = [CheckResult("Config file", PASS, f"{config.base_dir / 'config.yaml'} is valid")]
 
-    key = p.api_key()
+    gemini = llm_provider(config) == "gemini"
+    if gemini:
+        key, env_name, label, host = p.gemini_key(), "GEMINI_API_KEY", "Gemini API", "generativelanguage.googleapis.com"
+        model_key, model = "llm.gemini_model", config.get("llm.gemini_model", DEFAULT_GEMINI_MODEL)
+        ping = p.gemini_ping
+    else:
+        key, env_name, label, host = p.api_key(), "ANTHROPIC_API_KEY", "Claude API", "api.anthropic.com"
+        model_key, model = "llm.model", config.get("llm.model", "claude-sonnet-5-5")
+        ping = p.api_ping
     if key:
         masked = key[:7] + "..." + key[-4:] if len(key) > 12 else "set"
-        results.append(CheckResult("API key", PASS, f"ANTHROPIC_API_KEY {masked}"))
+        results.append(CheckResult("API key", PASS, f"{env_name} {masked}"))
     else:
-        results.append(CheckResult("API key", FAIL, "missing: run --setup or put ANTHROPIC_API_KEY in .env"))
+        results.append(CheckResult("API key", FAIL, f"missing: run --setup or put {env_name} in .env"))
 
     def api() -> CheckResult:
         if not key:
-            return CheckResult("Claude API", SKIP, "no API key")
-        status = p.api_ping(config)
-        model = config.get("llm.model", "claude-sonnet-5-5")
+            return CheckResult(label, SKIP, "no API key")
+        status = ping(config)
         return {
-            "ok": CheckResult("Claude API", PASS, f"reachable, model {model}"),
-            "offline": CheckResult("Claude API", FAIL, "can't reach api.anthropic.com (internet/firewall?)"),
-            "auth": CheckResult("Claude API", FAIL, "API key rejected - create a new key"),
-            "model": CheckResult("Claude API", FAIL, f"model '{model}' not found - check llm.model"),
-        }.get(status, CheckResult("Claude API", WARN, status))
+            "ok": CheckResult(label, PASS, f"reachable, model {model}"),
+            "offline": CheckResult(label, FAIL, f"can't reach {host} (internet/firewall?)"),
+            "auth": CheckResult(label, FAIL, "API key rejected - create a new key"),
+            "model": CheckResult(label, FAIL, f"model '{model}' not found - check {model_key}"),
+        }.get(status, CheckResult(label, WARN, status))
 
-    results.append(_safe(api, "Claude API"))
+    results.append(_safe(api, label))
     for kind, label in (("input", "Microphone"), ("output", "Speakers")):
         results.append(_safe(lambda k=kind, n=label: CheckResult(n, PASS, p.device(config, k)), label))
 

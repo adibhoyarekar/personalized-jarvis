@@ -1,5 +1,6 @@
 # Phase 1 - core (text mode)
 anthropic>=1.14.0
+openai>=1.40              # Google Gemini via its OpenAI-compatible endpoint (llm.provider: gemini)
 python-dotenv>=1.0
 PyYAML>=6.0
 psutil>=5.9

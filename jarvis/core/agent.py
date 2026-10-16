@@ -26,6 +26,18 @@ TurnCallback = Callable[[str, str, list[dict[str, Any]]], None]
 
 FALLBACK_BETA = "server-side-fallback-2026-07-01"
 
+GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/"
+DEFAULT_GEMINI_MODEL = "gemini-flash-latest"
+
+
+def llm_provider(config: Any) -> str:
+    """The configured model provider: "anthropic" (default) or "gemini"."""
+    return str(config.get("llm.provider", "anthropic") or "anthropic").strip().lower()
+
+
+def gemini_api_key() -> str | None:
+    return os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+
 SYSTEM_TEMPLATE = """\
 You are {name}, a personal voice assistant running on {user}'s {os_name} PC.
 
@@ -169,6 +181,9 @@ def _sanitize_content(content: Any) -> list[dict[str, Any]]:
 class Agent:
     """Runs conversations with Claude, executing tools and keeping short-term history.
 
+    Other providers subclass this and override the client, streaming, ``ping``,
+    ``complete`` and the error hooks; the tool loop and history stay shared.
+
     Args:
         config: Loaded :class:`core.config.Config`.
         registry: Enabled tools.
@@ -178,6 +193,11 @@ class Agent:
         on_turn: Called after each answered request with (text, reply, tool calls),
             e.g. to store command history.
     """
+
+    #: Exceptions meaning the API couldn't be reached (switches to offline mode).
+    CONNECTION_ERRORS: tuple[type[BaseException], ...] = (anthropic.APIConnectionError,)
+    #: Any other error raised by the provider's SDK.
+    API_ERRORS: tuple[type[BaseException], ...] = (anthropic.AnthropicError,)
 
     def __init__(
         self,
@@ -311,6 +331,9 @@ class Agent:
 
     # -- internals ---------------------------------------------------------
 
+    def _friendly_error(self, exc: Exception) -> AgentError:
+        return friendly_api_error(exc)
+
     def _system_prompt(self, user_text: str) -> str:
         facts: list[str] = []
         if self.facts_provider is not None:
@@ -421,7 +444,7 @@ class Agent:
         except AgentError as err:
             log.error("Agent error: %s", err)
             return self._fail(turn, spoken, err, emit, tool_calls)
-        except anthropic.APIConnectionError as exc:  # includes timeouts
+        except self.CONNECTION_ERRORS as exc:  # includes timeouts
             log.error("API unreachable: %r", exc)
             self.online = False
             self._last_connection_error = time.monotonic()
@@ -434,13 +457,13 @@ class Agent:
                 local = self._try_local(user_text, emit)
                 if local is not None:
                     return local
-            return self._fail(turn, spoken, friendly_api_error(exc), emit, tool_calls)
-        except anthropic.AnthropicError as exc:
-            log.error("Anthropic API error: %r", exc)
-            return self._fail(turn, spoken, friendly_api_error(exc), emit, tool_calls)
+            return self._fail(turn, spoken, self._friendly_error(exc), emit, tool_calls)
+        except self.API_ERRORS as exc:
+            log.error("%s API error: %r", llm_provider(self.config).capitalize(), exc)
+            return self._fail(turn, spoken, self._friendly_error(exc), emit, tool_calls)
         except Exception as exc:  # noqa: BLE001 - never crash the main loop
             log.exception("Unexpected error while answering")
-            return self._fail(turn, spoken, friendly_api_error(exc), emit, tool_calls)
+            return self._fail(turn, spoken, self._friendly_error(exc), emit, tool_calls)
 
     def _set_online(self) -> None:
         self.online = True
@@ -582,3 +605,18 @@ class Agent:
         if clean and clean[0]["role"] == "user":
             self._history.append(clean)
             del self._history[: -self.max_turns]
+
+
+def create_agent(config: Any, registry: ToolRegistry, gate: SafetyGate, **kwargs: Any) -> Agent:
+    """Build the agent for ``llm.provider`` (anthropic or gemini)."""
+    provider = llm_provider(config)
+    if provider == "gemini":
+        from core.gemini_agent import GeminiAgent
+
+        return GeminiAgent(config, registry, gate, **kwargs)
+    if provider != "anthropic":
+        raise AgentError(
+            "The AI provider in config.yaml isn't one I know.",
+            f"Unknown llm.provider '{provider}'. Use anthropic or gemini.",
+        )
+    return Agent(config, registry, gate, **kwargs)

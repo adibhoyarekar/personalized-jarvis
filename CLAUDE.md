@@ -37,6 +37,7 @@ jarvis/
     app.py              Runtime (agent+tools+memory+scheduler) and VoiceApp (tray, overlay,
                         supervisor, connectivity/offline mode, greeting, restart)
     agent.py            Claude loop: streaming, tool rounds, history, offline fallback, ping()
+    gemini_agent.py     Gemini backend (llm.provider: gemini), same loop via the openai SDK
     voice.py            VoiceAssistant event loop (wake/PTT/follow-up/barge-in/confirm/mute)
     audio_in.py         mic, devices, push-to-talk, wake word, VAD, Endpointer, AudioPipeline
     stt.py / tts.py     faster-whisper wrapper / pluggable TTS engines + SpeechStream
@@ -60,6 +61,11 @@ jarvis/
   latency), streaming via `client.beta.messages.stream` and
   `fallbacks="default"` with the `server-side-fallback-2026-07-01` beta.
   Don't use `budget_tokens`, forced `tool_choice`, or assistant prefill (all rejected by this model).
+- **Providers:** `llm.provider: gemini` swaps in `core/gemini_agent.py` (a subclass of
+  `Agent` using Gemini's OpenAI-compatible endpoint via the `openai` package). History and
+  the tool loop stay Anthropic-shaped; the subclass converts messages at the edge and
+  overrides `_stream_once`, `ping`, `complete` and the error hooks. Build agents with
+  `core.agent.create_agent`.
 - **History is append-only within a turn.** Finished turns are stored without
   thinking blocks (`_sanitize_content`) so trimming old turns never invalidates
   a replayed thinking block. Keep that invariant if you touch `Agent._commit`.

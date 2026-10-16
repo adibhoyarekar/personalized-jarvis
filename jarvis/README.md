@@ -36,7 +36,9 @@ Windows, and recovers from crashes on its own.
 
 - Windows 10 or 11, Python **3.11 or newer** (python.org installer; tick "Add to PATH").
 - A microphone and speakers or headphones.
-- An Anthropic API key (https://platform.claude.com/settings/keys).
+- An API key: Anthropic (Claude, paid: https://platform.claude.com/settings/keys) or
+  Google Gemini (free tier: https://aistudio.google.com/apikey). See
+  [Using Gemini for free](#using-gemini-for-free).
 - About 1 GB of disk for the speech model. A GPU is optional.
 - Internet for Claude, edge-tts voices, weather and news. Wake word and
   speech recognition run offline.
@@ -63,7 +65,8 @@ happen once.
 `python main.py --setup` asks, one question at a time (Enter keeps the
 current value):
 
-1. Your Anthropic API key. It's tested, then saved to `jarvis\.env`.
+1. Your API key (Anthropic `sk-ant-...` or Gemini `AIza...`). It's tested, then saved to
+   `jarvis\.env`, and `llm.provider` is set to match.
 2. What Jarvis should call you.
 3. Which microphone and which speakers, picked from a numbered list.
 4. Wake word sensitivity (0.2-0.9).
@@ -255,16 +258,36 @@ schema from the type hints and docstring. See
 [docs/ADDING_TOOLS.md](docs/ADDING_TOOLS.md) for arguments, settings,
 confirmations and tests.
 
+## Using Gemini for free
+
+Google's Gemini API has a free tier, so Jarvis can run without paying for Claude.
+
+1. Create a key at https://aistudio.google.com/apikey (it starts with `AIza`).
+2. Run `python main.py --setup` and paste it, or set it up by hand:
+   - add `GEMINI_API_KEY=AIza...` to `jarvis\.env`
+   - set `llm.provider: gemini` in `config.yaml`
+3. Run `python main.py --check`. The `Gemini API` row should say PASS.
+
+Notes:
+- `llm.gemini_model` defaults to `gemini-flash-latest`. If Google retires that
+  name, use any current model from the AI Studio model list, e.g. `gemini-2.5-flash`.
+- The free tier has per-minute and per-day request limits. When you hit one,
+  Jarvis says "I've hit Gemini's free-tier limit" and works again shortly after.
+- Google may use free-tier prompts to improve its products; don't use it for
+  anything private.
+- Tools, confirmations, memory and offline mode work the same with either provider.
+  Switch back any time with `llm.provider: anthropic`.
+
 ## Configuration reference (`config.yaml`)
 
-Secrets live in `.env` (`ANTHROPIC_API_KEY=...`); everything else is in
+Secrets live in `.env` (`ANTHROPIC_API_KEY=...` or `GEMINI_API_KEY=...`); everything else is in
 `config.yaml`. Every value is checked when Jarvis starts. A typo like
 `silense_timeout` or a value out of range stops it with a clear message.
 
 | Section | Settings |
 |---|---|
 | `assistant` | `name`, `user_name` (how Jarvis addresses you) |
-| `llm` | `model` (`claude-sonnet-5-5`), `effort` (`low`…`max`), `max_tokens`, `max_history_turns` (10), `max_tool_rounds`, `max_tool_calls` (6), `request_timeout_s`, `max_retries`, `refusal_fallback` |
+| `llm` | `provider` (`anthropic` or `gemini`), `model` (`claude-sonnet-5-5`), `gemini_model` (`gemini-flash-latest`), `effort` (`low`…`max`), `max_tokens`, `max_history_turns` (10), `max_tool_rounds`, `max_tool_calls` (6), `request_timeout_s`, `max_retries`, `refusal_fallback` |
 | `tools` | `timeout_s`, `disabled` (tool names), `disabled_modules`, `folders` (spoken folder names) |
 | `apps` | Spoken name -> program for `open_app` |
 | `safe_roots` | The only folders file tools may touch |
@@ -319,7 +342,7 @@ Secrets live in `.env` (`ANTHROPIC_API_KEY=...`); everything else is in
 
 ## Security notes
 
-- **The API key** stays in `.env` and is only sent to Anthropic.
+- **The API key** stays in `.env` and is only sent to your chosen provider (Anthropic or Google).
 - **What Claude sees:** your spoken requests, tool results (file contents you
   ask about, clipboard text you ask to summarise, search results) and the
   facts Jarvis selects from memory. Don't ask it to read secrets aloud.
@@ -338,7 +361,7 @@ Secrets live in `.env` (`ANTHROPIC_API_KEY=...`); everything else is in
 ## Development
 
 ```powershell
-python -m pytest              # ~280 tests, no microphone or API key needed
+python -m pytest              # ~290 tests, no microphone or API key needed
 python main.py --text         # exercise the agent and tools by typing
 ```
 

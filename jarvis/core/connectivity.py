@@ -57,7 +57,7 @@ class ConnectivityMonitor:
             if not self.online:
                 return
             self.online = False
-        log.warning("Claude API unreachable; running in degraded mode")
+        log.warning("LLM API unreachable; running in degraded mode")
         self._fire(self.on_offline)
         self._wake.set()
 
@@ -66,7 +66,7 @@ class ConnectivityMonitor:
             if self.online:
                 return
             self.online = True
-        log.info("Claude API reachable again")
+        log.info("LLM API reachable again")
         self._fire(self.on_online)
 
     def start(self) -> None:

@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-from core.agent import Agent
+from core.agent import Agent, create_agent
 from core.config import PROJECT_DIR, Config
 from core.connectivity import ConnectivityMonitor
 from core.memory import Memory
@@ -69,7 +69,7 @@ def build_runtime(config: Config, confirm: Callable[[str], bool] | None = None) 
     set_context(context)
     registry = ToolRegistry.from_config(config)
     gate = SafetyGate.from_config(config, confirm)
-    agent = Agent(
+    agent = create_agent(
         config,
         registry,
         gate,
@@ -339,7 +339,7 @@ class VoiceApp:
             agent.on_connection_lost = self.monitor.mark_offline
             agent.on_connection_restored = self.monitor.mark_online
             if not self.monitor.check_now():
-                self.print("Offline: Claude is unreachable. Local commands still work; retrying every 30 s.")
+                self.print("Offline: the AI service is unreachable. Local commands still work; retrying every 30 s.")
             self.monitor.start()
 
             try:

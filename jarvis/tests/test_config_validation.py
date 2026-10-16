@@ -138,3 +138,17 @@ def test_wizard_rejects_bad_input_and_keeps_values(tmp_path: Path) -> None:
     data = yaml.safe_load(cfg.read_text(encoding="utf-8"))
     assert data["audio"]["input_device"] is None and data["wake"]["threshold"] == 0.5
     assert not (tmp_path / ".env").exists()
+
+
+def test_wizard_gemini_key_switches_provider(tmp_path: Path) -> None:
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(DEFAULT_CONFIG_PATH.read_text(encoding="utf-8"), encoding="utf-8")
+    answers = iter([""] * 20)
+    tested: list[str] = []
+    io = WizardIO(ask=lambda q: next(answers), secret=lambda q: "AIzaSy-test-key-123456", out=lambda s: None,
+                  devices=lambda kind: [], test_key=lambda k: "unused",
+                  test_gemini_key=lambda k: tested.append(k) or "ok", geocode=lambda c: None)
+    assert run_wizard(cfg, io) == 0
+    assert tested == ["AIzaSy-test-key-123456"]
+    assert yaml.safe_load(cfg.read_text(encoding="utf-8"))["llm"]["provider"] == "gemini"
+    assert "GEMINI_API_KEY=AIzaSy-test-key-123456" in (tmp_path / ".env").read_text()

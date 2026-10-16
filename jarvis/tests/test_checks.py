@@ -94,3 +94,15 @@ def test_table_format() -> None:
     assert lines[0].startswith("Check        Result")
     assert lines[3] == "Longer name  FAIL    bad thing"
     assert lines[-1] == "1 passed, 0 warning(s), 1 failed"
+
+
+def test_gemini_provider_checks_gemini_key_and_api(tmp_path: Path) -> None:
+    probes = healthy()
+    probes.api_key = lambda: None  # no Anthropic key is fine when using Gemini
+    probes.gemini_key = lambda: "AIzaSyabcdefghijkl9876"
+    probes.gemini_ping = lambda cfg: "model"
+    cfg = config(tmp_path, llm={"provider": "gemini", "gemini_model": "gemini-x"})
+    results = by_name(collect_checks(cfg, probes))
+    assert results["API key"] == (PASS, "GEMINI_API_KEY AIzaSya...9876")
+    assert results["Gemini API"] == (FAIL, "model 'gemini-x' not found - check llm.gemini_model")
+    assert "Claude API" not in results

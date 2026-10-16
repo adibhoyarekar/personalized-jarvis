@@ -50,6 +50,24 @@ def _test_key(key: str) -> str:
         return f"error: {exc}"
 
 
+def _test_gemini_key(key: str) -> str:
+    import openai
+
+    from core.agent import GEMINI_BASE_URL
+
+    try:
+        openai.OpenAI(api_key=key, base_url=GEMINI_BASE_URL, timeout=10, max_retries=0).models.list()
+        return "ok"
+    except (openai.AuthenticationError, openai.PermissionDeniedError):
+        return "rejected"
+    except openai.BadRequestError as exc:
+        return "rejected" if "API key" in str(exc) or "API_KEY" in str(exc) else f"error: {exc}"
+    except openai.APIConnectionError:
+        return "offline"
+    except Exception as exc:  # noqa: BLE001
+        return f"error: {exc}"
+
+
 def _geocode(city: str) -> tuple[float, float, str] | None:
     try:
         from tools.web_tools import geocode
@@ -68,6 +86,7 @@ class WizardIO:
     out: Callable[[str], None] = print
     devices: Callable[[str], list[tuple[int, str]]] = _list_devices
     test_key: Callable[[str], str] = _test_key
+    test_gemini_key: Callable[[str], str] = _test_gemini_key
     geocode: Callable[[str], tuple[float, float, str] | None] = _geocode
     extra: dict[str, Any] = field(default_factory=dict)
 
@@ -95,26 +114,38 @@ def run_wizard(config_path: Path | None = None, io: WizardIO | None = None) -> i
 
     io.out("Jarvis setup - press Enter to keep the value in [brackets].\n")
 
-    # 1. API key -> .env
+    # 1. API key -> .env (the key's format picks the provider)
     env_path = path.parent / ".env"
-    existing = os.environ.get("ANTHROPIC_API_KEY", "")
+    provider = str(cur("llm.provider", "anthropic")).lower()
+    env_name = "GEMINI_API_KEY" if provider == "gemini" else "ANTHROPIC_API_KEY"
+    existing = os.environ.get(env_name, "")
     if env_path.exists():
         for line in env_path.read_text(encoding="utf-8").splitlines():
-            if line.strip().startswith("ANTHROPIC_API_KEY="):
+            if line.strip().startswith(f"{env_name}="):
                 existing = line.split("=", 1)[1].strip()
     shown = f"{existing[:7]}...{existing[-4:]}" if len(existing) > 12 and not existing.endswith("...") else "not set"
-    io.out("1) Anthropic API key (from https://platform.claude.com/settings/keys)")
+    io.out("1) API key: an Anthropic key (sk-ant-..., https://platform.claude.com/settings/keys)\n"
+           "   or a free Google Gemini key (AIza..., https://aistudio.google.com/apikey)")
     key = io.secret(f"   Paste your key [{shown}]: ").strip()
     if key:
-        if not key.startswith("sk-ant-"):
-            io.out("   That doesn't look like an Anthropic key (they start with sk-ant-). Keeping the old one.")
+        if key.startswith("sk-ant-"):
+            new_provider, env_name, tester = "anthropic", "ANTHROPIC_API_KEY", io.test_key
+        elif key.startswith("AIza"):
+            new_provider, env_name, tester = "gemini", "GEMINI_API_KEY", io.test_gemini_key
         else:
-            result = io.test_key(key)
+            new_provider = ""
+            io.out("   That doesn't look like an Anthropic key (sk-ant-...) or a Gemini key (AIza...). "
+                   "Keeping the old one.")
+        if new_provider:
+            result = tester(key)
             io.out({"ok": "   Key works.", "rejected": "   Warning: the API rejected this key.",
                     "offline": "   Couldn't reach the API to test it (offline?) - saving anyway."}.get(
                 result, f"   Couldn't test the key ({result}) - saving anyway."))
-            set_env(env_path, "ANTHROPIC_API_KEY", key)
+            set_env(env_path, env_name, key)
             io.out(f"   Saved to {env_path}")
+            if new_provider != provider:
+                text = set_value(text, "llm.provider", new_provider)
+                io.out(f"   Jarvis will use {'Google Gemini' if new_provider == 'gemini' else 'Claude'}.")
 
     # 2. Name
     name = io.ask(f"\n2) What should Jarvis call you? [{cur('assistant.user_name', '') or 'sir'}]: ").strip()
