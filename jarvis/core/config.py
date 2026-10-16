@@ -30,9 +30,10 @@ class Config:
         'claude-sonnet-5-5'
     """
 
-    def __init__(self, data: dict[str, Any], base_dir: Path) -> None:
+    def __init__(self, data: dict[str, Any], base_dir: Path, source: Path | None = None) -> None:
         self._data = data
         self.base_dir = base_dir
+        self.source = source  # the file it was loaded from, if any
 
     def get(self, key: str, default: Any = None) -> Any:
         """Return the value at a dotted key like ``"llm.model"``, or ``default``."""
@@ -42,6 +43,17 @@ class Config:
                 return default
             node = node[part]
         return default if node is None else node
+
+    def set(self, key: str, value: Any) -> None:
+        """Change a dotted key in memory (the file is not touched)."""
+        node = self._data
+        *parents, last = key.split(".")
+        for part in parents:
+            child = node.get(part)
+            if not isinstance(child, dict):
+                child = node[part] = {}
+            node = child
+        node[last] = value
 
     def require(self, key: str) -> Any:
         """Like :meth:`get` but raise :class:`ConfigError` when the key is absent."""
@@ -100,4 +112,4 @@ def load_config(path: Path | None = None, validate: bool = True) -> Config:
     if env_file.is_file():
         load_dotenv(env_file, override=False)
         log.debug("Loaded environment from %s", env_file)
-    return Config(data, path.parent)
+    return Config(data, path.parent, source=path)

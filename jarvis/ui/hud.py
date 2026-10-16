@@ -56,6 +56,15 @@ CLOSE_GRACE_S = 2.5   # a reload reconnects within this; longer means the window
 # ---------------------------------------------------------------------------
 
 
+def _device_arg(value: Any) -> int | None | bool:
+    """A device index from the page: None (system default), an int, or False if invalid."""
+    if value is None:
+        return None
+    if isinstance(value, int) and not isinstance(value, bool) and 0 <= value < 1024:
+        return value
+    return False
+
+
 def mic_level(rms: float) -> float:
     """Map microphone RMS to 0..1 on a dB scale (-55 dB is silence, -15 dB is loud speech)."""
     import math
@@ -253,6 +262,10 @@ class HudActions(Protocol):
     def is_muted(self) -> bool: ...
     def current_mode(self) -> str: ...  # "wake" | "push-to-talk"
     def window_closed(self) -> None: ...
+    def audio_devices(self) -> dict[str, Any]: ...
+    def set_audio_devices(self, input_device: int | None, output_device: int | None) -> None: ...
+    def test_speaker(self, device: int | None) -> None: ...
+    def test_microphone(self, device: int | None) -> float: ...
 
 
 Launcher = Callable[[str], Any]
@@ -491,18 +504,52 @@ class HudWindow:
             if not self._clients:
                 self._empty_since = time.monotonic()
 
-    def handle_post(self, path: str, body: dict[str, Any]) -> int:
-        """A request from the page. Returns the HTTP status."""
+    def handle_post(self, path: str, body: dict[str, Any]) -> tuple[int, dict[str, Any] | None]:
+        """A request from the page. Returns the HTTP status and an optional JSON reply."""
         if path == "/api/send":
             text = str(body.get("text", "")).strip()[:2000]
             if text:
                 self.actions.submit_text(text)
-            return 204
+            return 204, None
         if path == "/api/mute":
             self.actions.toggle_mute()
             self._poll_controls(force=True)
-            return 204
-        return 404
+            return 204, None
+        if path == "/api/audio":
+            if not ("input" in body and "output" in body):
+                return 400, {"error": "Pick a microphone and a speaker."}
+            inp, out = _device_arg(body["input"]), _device_arg(body["output"])
+            if inp is False or out is False:
+                return 400, {"error": "Unknown device."}
+            return self._audio_call(lambda: self.actions.set_audio_devices(inp, out))
+        if path == "/api/audio/test":
+            device = _device_arg(body.get("device"))
+            kind = body.get("kind")
+            if device is False or kind not in ("input", "output"):
+                return 400, {"error": "Unknown device."}
+            if kind == "output":
+                return self._audio_call(lambda: self.actions.test_speaker(device))
+            return self._audio_call(lambda: {"level": mic_level(float(self.actions.test_microphone(device)))})
+        return 404, None
+
+    def audio_info(self) -> dict[str, Any]:
+        try:
+            return self.actions.audio_devices()
+        except Exception as exc:  # noqa: BLE001 - shown in the dialog instead
+            log.warning("Listing audio devices failed: %s", exc)
+            return {"error": str(exc) or type(exc).__name__}
+
+    def _audio_call(self, call: Callable[[], Any]) -> tuple[int, dict[str, Any]]:
+        try:
+            result = call()
+        except Exception as exc:  # noqa: BLE001 - AudioError/OSError: the page shows the message
+            log.warning("Audio settings: %s", exc)
+            return 200, {"ok": False, "error": str(exc) or type(exc).__name__}
+        return 200, {"ok": True, **(result if isinstance(result, dict) else {})}
+
+    def log(self, tag: str, text: str) -> None:
+        """Add a line to the HUD's event log."""
+        self._log(tag, text)
 
     def _send(self, message: dict[str, Any]) -> None:
         data = json.dumps(message).encode()
@@ -621,7 +668,12 @@ class _Handler(BaseHTTPRequestHandler):
             return self._reply(200, (ASSETS / "index.html").read_bytes(), "text/html; charset=utf-8")
         if parts.path == "/events":
             return self._events()
+        if parts.path == "/api/audio":
+            return self._json(200, self.server.hud.audio_info())
         return self._reply(404, b"not found")
+
+    def _json(self, status: int, payload: dict[str, Any]) -> None:
+        self._reply(status, json.dumps(payload).encode(), "application/json")
 
     def do_POST(self) -> None:  # noqa: N802
         parts = urlsplit(self.path)
@@ -638,8 +690,10 @@ class _Handler(BaseHTTPRequestHandler):
             return self._reply(400, b"bad json")
         if not isinstance(body, dict):
             return self._reply(400, b"bad json")
-        status = self.server.hud.handle_post(parts.path, body)
-        self._reply(status)
+        status, payload = self.server.hud.handle_post(parts.path, body)
+        if payload is None:
+            return self._reply(status)
+        self._json(status, payload)
 
     def _events(self) -> None:
         hud = self.server.hud

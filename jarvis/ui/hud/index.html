@@ -105,6 +105,9 @@
       <button type="button" class="mic" id="mic" title="Microphone on/off (Ctrl+M)" aria-label="Toggle microphone">
         <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21M8.5 21h7"/><path class="slash" d="M4 20 20 4"/></svg>
       </button>
+      <button type="button" class="mic gear" id="gear" title="Audio devices" aria-label="Choose microphone and speaker" aria-haspopup="dialog">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h9M17 7h3M4 17h3M11 17h9"/><circle cx="15" cy="7" r="2.2"/><circle cx="9" cy="17" r="2.2"/></svg>
+      </button>
       <label class="cmd-box">
         <span class="prompt">JARVIS://</span>
         <input id="input" maxlength="2000" spellcheck="false" placeholder="ENTER COMMAND">
@@ -121,6 +124,36 @@
     </div>
   </section>
 </main>
+
+<dialog id="audio" aria-labelledby="audio-title">
+  <div class="panel dlg">
+    <div class="panel-head"><span id="audio-title">AUDIO.ROUTING</span><em>I/O CONFIG</em></div>
+    <div class="dlg-body">
+      <div class="dev">
+        <label for="dev-in"><b>INPUT</b> // MICROPHONE</label>
+        <div class="dev-row">
+          <div class="sel"><select id="dev-in"></select></div>
+          <button type="button" class="ghost" id="test-in">TEST MIC</button>
+        </div>
+        <div class="meter" id="meter-in"><i></i></div>
+        <div class="dev-note" id="note-in">Press TEST MIC and say something.</div>
+      </div>
+      <div class="dev">
+        <label for="dev-out"><b>OUTPUT</b> // SPEAKER</label>
+        <div class="dev-row">
+          <div class="sel"><select id="dev-out"></select></div>
+          <button type="button" class="ghost" id="test-out">TEST SPEAKER</button>
+        </div>
+        <div class="dev-note" id="note-out">Press TEST SPEAKER to hear a tone.</div>
+      </div>
+      <div class="dlg-status" id="audio-status" role="status"></div>
+    </div>
+    <div class="dlg-actions">
+      <button type="button" class="ghost" id="audio-cancel">CANCEL</button>
+      <button type="button" class="exec" id="audio-apply"><span>APPLY</span></button>
+    </div>
+  </div>
+</dialog>
 
 <div id="offline" hidden>
   <div class="off-inner"><div class="off-title">CONNECTION TERMINATED</div><div class="off-sub">J.A.R.V.I.S. // OFFLINE</div></div>

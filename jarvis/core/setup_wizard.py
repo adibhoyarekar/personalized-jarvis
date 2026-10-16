@@ -23,17 +23,9 @@ Ask = Callable[[str], str]
 
 
 def _list_devices(kind: str) -> list[tuple[int, str]]:
-    from core.audio_in import _sd
+    from core.audio_in import device_options
 
-    sd = _sd()
-    key = "max_input_channels" if kind == "input" else "max_output_channels"
-    hostapis = sd.query_hostapis()
-    out = []
-    for idx, dev in enumerate(sd.query_devices()):
-        if dev[key] > 0:
-            api = hostapis[dev["hostapi"]]["name"].replace("Windows ", "")
-            out.append((idx, f"{dev['name']} ({api})"))
-    return out
+    return [(d["index"], f"{d['name']} ({d['api']})") for d in device_options(kind)]
 
 
 def _test_key(key: str) -> str:

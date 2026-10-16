@@ -237,6 +237,8 @@ class VoiceApp:
         self._quit = threading.Event()
         self._restart_process = False
         self._reload_session = False
+        self._audio_changed = False
+        self._settings_lock = threading.Lock()
         self._first_session = True
         self._offline_notice_pending = False
         self.recorder: Any = None
@@ -298,6 +300,101 @@ class VoiceApp:
     def show_window(self) -> None:
         if self.window is not None:
             self.window.show()
+
+    # -- audio devices (called from HUD server threads) -------------------------------
+
+    def audio_devices(self) -> dict[str, Any]:
+        """Selectable microphones and speakers, plus which ones are in use."""
+        from core.audio_in import AudioError, default_device, device_options, resolve_device
+
+        result: dict[str, Any] = {}
+        for kind in ("input", "output"):
+            try:
+                options = device_options(kind)
+            except AudioError as exc:
+                result[kind] = {"options": [], "selected": None, "default": None, "error": str(exc)}
+                continue
+            spec = self.config.get(f"audio.{kind}_device")
+            try:
+                selected = None if spec is None else resolve_device(spec, kind)
+            except AudioError:
+                selected = None
+            result[kind] = {"options": options, "selected": selected, "default": default_device(kind)}
+        return result
+
+    def set_audio_devices(self, input_device: int | None, output_device: int | None) -> None:
+        """Save the chosen devices to config.yaml and switch to them (None = Windows default).
+
+        Raises:
+            AudioError: If a device can't be opened; nothing is saved then.
+            OSError: If config.yaml can't be written.
+        """
+        from core.audio_in import check_device
+
+        check_device(input_device, "input")
+        check_device(output_device, "output")
+        self._save_settings({"audio.input_device": input_device, "audio.output_device": output_device})
+        log.info("Audio devices set: input=%s output=%s", input_device, output_device)
+        self._audio_changed = True
+        assistant = self.assistant
+        if assistant is not None:
+            self._reload_session = True
+            assistant.stop()
+
+    def test_speaker(self, device: int | None) -> None:
+        from core.audio_in import play_test_tone
+
+        play_test_tone(device)
+
+    def test_microphone(self, device: int | None) -> float:
+        from core.audio_in import probe_input
+
+        return probe_input(device)
+
+    def _save_settings(self, values: dict[str, Any]) -> None:
+        from core.config_editor import set_value
+
+        path = self.config.source or PROJECT_DIR / "config.yaml"
+        with self._settings_lock:
+            text = path.read_text(encoding="utf-8")
+            for key, value in values.items():
+                text = set_value(text, key, value)
+            path.write_text(text, encoding="utf-8")
+            for key, value in values.items():
+                self.config.set(key, value)
+
+    def _switch_audio(self) -> None:
+        """Reopen the mic and speakers on the configured devices (voice thread, between sessions)."""
+        from core.audio_in import AudioError, MicRecorder
+
+        self._audio_changed = False
+        problems = []
+        if self.recorder is not None:
+            try:
+                recorder = MicRecorder(
+                    self.config.get("audio.input_device"), int(self.config.get("audio.sample_rate", 16000))
+                )
+                recorder.open()
+            except AudioError as exc:
+                log.warning("Keeping the old microphone: %s", exc)
+                problems.append(f"Couldn't open that microphone, so I kept the old one. {exc}")
+            else:
+                self.recorder.close()
+                if self.window is not None:
+                    recorder.add_listener(self._on_mic_frame)
+                self.recorder = recorder
+        if self.tts is not None:
+            self.tts.shutdown()
+        self.tts = make_tts(self.config, on_error=self._tts_error, quiet=True)
+        if self.tts is None:
+            problems.append("Speech output couldn't start on that speaker.")
+        if self.sounds is not None:
+            self.sounds.output_device = self._output_device()
+        if self.window is not None:
+            for text in problems:
+                self.window.on_notice(text)
+            if not problems:
+                self.window.log("AUDIO", "Audio routing updated.")
 
     # -- WindowActions ------------------------------------------------------------------
 
@@ -450,6 +547,8 @@ class VoiceApp:
         from core.voice import VoiceAssistant, VoiceSettings
 
         assert self.runtime is not None
+        if self._audio_changed:
+            self._switch_audio()
         cfg = self.config
         pipeline = build_pipeline(cfg, self.recorder, self.debug) if self.wake_mode else None
         settings = VoiceSettings(

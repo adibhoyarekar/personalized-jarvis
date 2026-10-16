@@ -157,6 +157,9 @@ Brave are used if Edge is missing. The page is served only to this PC
 - Type a command and press Enter (it interrupts a reply like F9 does), or use
   the quick buttons (status report, weather, briefing, news, tasks).
 - The mic button or **Ctrl+M** turns the microphone off and on.
+- The sliders button next to it picks the **microphone and speaker**. TEST MIC
+  listens for 2 seconds and shows the signal; TEST SPEAKER plays a tone. APPLY
+  saves the choice to `config.yaml` and switches over without a restart.
 
 - **X (close)** hides the window; Jarvis keeps running in the tray. Click the
   tray icon (or "Open Jarvis" in its menu) to bring the window back.
@@ -364,7 +367,7 @@ Secrets live in `.env` (`ANTHROPIC_API_KEY=...` or `GEMINI_API_KEY=...`); everyt
 |---|---|
 | Anything at all | `python main.py --check`, then look at `logs\jarvis.log` |
 | "No microphone found" | Settings > Privacy & security > Microphone > allow desktop apps; plug the mic in before starting |
-| Wrong mic or speakers | `--list-devices`, then `--setup` or set `audio.input_device` / `output_device` |
+| Wrong mic or speakers | The sliders button in the HUD, or `--list-devices` then `--setup` / set `audio.input_device` / `output_device` |
 | F9 does nothing | The `keyboard` library needs no admin for normal windows, but an elevated window (admin terminal, Task Manager) swallows keys: run Jarvis as admin too, or set `hotkey_backend: pynput`. Or pick another `hotkey` |
 | Wake word fires by itself | Raise `wake.threshold` to 0.6-0.7 (watch `[wake]` scores with `--debug`) |
 | Wake word misses you | Lower `wake.threshold` to 0.35-0.4; raise mic level in Windows Sound settings (~75%) |

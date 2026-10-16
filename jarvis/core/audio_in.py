@@ -105,6 +105,83 @@ def resolve_device(spec: Any, kind: str) -> int | None:
     raise AudioError(f"No {kind} device matching '{spec}'. Run: python main.py --list-devices")
 
 
+def device_options(kind: str) -> list[dict[str, Any]]:
+    """Every device usable for ``kind`` ("input" or "output") as ``{index, name, api}``."""
+    sd = _sd()
+    key = "max_input_channels" if kind == "input" else "max_output_channels"
+    hostapis = sd.query_hostapis()
+    return [
+        {"index": idx, "name": str(dev["name"]), "api": hostapis[dev["hostapi"]]["name"].replace("Windows ", "")}
+        for idx, dev in enumerate(sd.query_devices())
+        if dev[key] > 0
+    ]
+
+
+def default_device(kind: str) -> int | None:
+    """Index of the system default ``kind`` device, or None if there is none."""
+    try:
+        idx = _sd().default.device[0 if kind == "input" else 1]
+    except Exception:  # noqa: BLE001
+        return None
+    return idx if isinstance(idx, int) and idx >= 0 else None
+
+
+def check_device(index: int | None, kind: str) -> int | None:
+    """Make sure a device can be opened for mono audio; returns its resolved index.
+
+    Raises:
+        AudioError: With a message for the user when it can't.
+    """
+    idx = resolve_device(index, kind)
+    sd = _sd()
+    try:
+        info = sd.query_devices(idx, kind=kind)
+        check = sd.check_input_settings if kind == "input" else sd.check_output_settings
+        check(device=idx, channels=1, samplerate=float(info["default_samplerate"]))
+    except Exception as exc:  # noqa: BLE001 - PortAudioError/ValueError
+        noun = "microphone" if kind == "input" else "speaker"
+        raise AudioError(f"That {noun} can't be opened ({exc}). Try another entry for it.") from exc
+    return idx
+
+
+def probe_input(index: int | None, seconds: float = 2.0) -> float:
+    """Listen on an input device briefly and return the loudest block's RMS."""
+    sd = _sd()
+    idx = check_device(index, "input")
+    rate = int(sd.query_devices(idx, kind="input")["default_samplerate"])
+    peak = 0.0
+
+    def callback(indata: np.ndarray, frames: int, time_info: Any, status: Any) -> None:
+        nonlocal peak
+        rms = float(np.sqrt(np.mean(np.square(indata[:, 0], dtype=np.float64)))) if frames else 0.0
+        peak = max(peak, rms)
+
+    try:
+        with sd.InputStream(device=idx, channels=1, samplerate=rate, dtype="float32", callback=callback):
+            time.sleep(seconds)
+    except Exception as exc:  # noqa: BLE001
+        raise AudioError(f"Couldn't listen on that microphone ({exc}).") from exc
+    return peak
+
+
+def play_test_tone(index: int | None) -> None:
+    """Play a short rising tone on an output device (blocks until it finishes)."""
+    from core.sounds import SAMPLE_RATE, tone
+
+    sd = _sd()
+    idx = check_device(index, "output")
+    samples = tone([523.25, 659.25, 783.99, 1046.5], duration_s=0.14, volume=0.3)
+    rate = SAMPLE_RATE
+    native = int(sd.query_devices(idx, kind="output")["default_samplerate"])
+    if native != rate:
+        samples, rate = resample(samples, rate, native), native
+    try:
+        with sd.OutputStream(device=idx, channels=1, samplerate=rate, dtype="float32") as stream:
+            stream.write(samples.reshape(-1, 1))
+    except Exception as exc:  # noqa: BLE001
+        raise AudioError(f"Couldn't play on that speaker ({exc}).") from exc
+
+
 def resample(audio: np.ndarray, src_rate: int, dst_rate: int) -> np.ndarray:
     """Linear-interpolation resampling; good enough for speech recognition."""
     if src_rate == dst_rate or audio.size == 0:

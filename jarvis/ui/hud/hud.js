@@ -823,9 +823,157 @@
       post("/api/mute");
       return;
     }
+    if (dlg.open) return;
     if (e.key === "Escape") { input.value = ""; input.blur(); return; }
     if (document.activeElement !== input && e.key.length === 1 && !e.ctrlKey && !e.altKey && !e.metaKey) input.focus();
   });
+
+  // ------------------------------------------------------------------ audio routing
+
+  const dlg = $("audio");
+  const selIn = $("dev-in");
+  const selOut = $("dev-out");
+  const API_ORDER = ["MME", "DirectSound", "WASAPI", "WDM-KS"];
+  const apiRank = (name) => { const i = API_ORDER.indexOf(name); return i < 0 ? 99 : i; };
+  const devArg = (value) => (value === "" ? null : Number(value));
+
+  async function api(path, body) {
+    const headers = { "X-Jarvis-Token": token };
+    const opts = body === undefined ? { headers }
+      : { method: "POST", headers: { ...headers, "Content-Type": "application/json" }, body: JSON.stringify(body) };
+    const res = await fetch(path, opts);
+    if (!res.ok && res.status !== 400) throw new Error(`link error ${res.status}`);
+    return res.json();
+  }
+
+  function fillSelect(sel, info) {
+    const options = info.options || [];
+    const fallback = options.find((o) => o.index === info.default);
+    sel.textContent = "";
+    sel.append(new Option(fallback ? `Windows default (${fallback.name})` : "Windows default", ""));
+    const groups = new Map();
+    options.forEach((o) => { if (!groups.has(o.api)) groups.set(o.api, []); groups.get(o.api).push(o); });
+    [...groups.keys()].sort((a, b) => apiRank(a) - apiRank(b)).forEach((name) => {
+      const group = document.createElement("optgroup");
+      group.label = name;
+      groups.get(name).forEach((o) => {
+        const shared = options.some((x) => x.name === o.name && x.api !== o.api);
+        group.append(new Option(shared ? `${o.name} · ${o.api}` : o.name, String(o.index)));
+      });
+      sel.append(group);
+    });
+    sel.value = info.selected == null ? "" : String(info.selected);
+  }
+
+  function note(kind, text, cls) {
+    const el = $(kind === "input" ? "note-in" : "note-out");
+    el.textContent = text;
+    el.className = "dev-note" + (cls ? " " + cls : "");
+  }
+
+  function setStatus(text, cls) {
+    const el = $("audio-status");
+    el.textContent = text;
+    el.className = "dlg-status" + (cls ? " " + cls : "");
+  }
+
+  function setMeter(cls, level) {
+    const meter = $("meter-in");
+    meter.className = "meter" + (cls ? " " + cls : "");
+    meter.firstElementChild.style.width = level == null ? "" : `${Math.max(3, Math.round(level * 100))}%`;
+  }
+
+  async function openAudio() {
+    if (dlg.open) return;
+    setStatus("");
+    setMeter("", 0);
+    note("input", "Press TEST MIC and say something.");
+    note("output", "Press TEST SPEAKER to hear a tone.");
+    [selIn, selOut].forEach((sel) => { sel.textContent = ""; sel.append(new Option("SCANNING DEVICES...", "")); sel.disabled = true; });
+    $("audio-apply").disabled = true;
+    dlg.showModal();
+    try {
+      const info = await api("/api/audio");
+      if (info.error) throw new Error(info.error);
+      fillSelect(selIn, info.input || {});
+      fillSelect(selOut, info.output || {});
+      if (info.input && info.input.error) note("input", info.input.error, "bad");
+      if (info.output && info.output.error) note("output", info.output.error, "bad");
+      $("audio-apply").disabled = false;
+    } catch (err) {
+      setStatus(`Couldn't read the audio devices: ${err.message}`);
+    } finally {
+      selIn.disabled = selOut.disabled = false;
+      selIn.focus();
+    }
+  }
+
+  async function runTest(btn, label, busyLabel, work) {
+    if (btn.disabled) return;
+    btn.disabled = true;
+    btn.classList.add("busy");
+    btn.textContent = busyLabel;
+    try {
+      await work();
+    } finally {
+      btn.disabled = false;
+      btn.classList.remove("busy");
+      btn.textContent = label;
+    }
+  }
+
+  $("test-in").addEventListener("click", () => runTest($("test-in"), "TEST MIC", "LISTENING", async () => {
+    setMeter("scan", null);
+    note("input", "Listening for 2 seconds. Say something now.", "");
+    try {
+      const r = await api("/api/audio/test", { kind: "input", device: devArg(selIn.value) });
+      if (!r.ok) { setMeter("none", 0); note("input", r.error || "That microphone didn't work.", "bad"); return; }
+      if (r.level >= 0.45) { setMeter("", r.level); note("input", "Signal locked. This microphone hears you.", "ok"); }
+      else if (r.level >= 0.2) { setMeter("weak", r.level); note("input", "Faint signal. Move closer or raise the mic volume in Windows.", "warn"); }
+      else { setMeter("none", r.level); note("input", "No signal. Check the mic's mute switch, Windows microphone privacy, or pick another entry.", "bad"); }
+    } catch (err) {
+      setMeter("none", 0);
+      note("input", err.message, "bad");
+    }
+  }));
+
+  $("test-out").addEventListener("click", () => runTest($("test-out"), "TEST SPEAKER", "PLAYING", async () => {
+    note("output", "Playing a tone...", "");
+    try {
+      const r = await api("/api/audio/test", { kind: "output", device: devArg(selOut.value) });
+      if (r.ok) note("output", "Tone sent. If you didn't hear it, pick another output.", "ok");
+      else note("output", r.error || "That speaker didn't work.", "bad");
+    } catch (err) {
+      note("output", err.message, "bad");
+    }
+  }));
+
+  $("audio-apply").addEventListener("click", async () => {
+    const btn = $("audio-apply");
+    if (btn.disabled) return;
+    btn.disabled = true;
+    setStatus("Applying...", "ok");
+    try {
+      const r = await api("/api/audio", { input: devArg(selIn.value), output: devArg(selOut.value) });
+      if (r.ok) {
+        setStatus("Saved. Switching audio now.", "ok");
+        setTimeout(() => dlg.close(), 700);
+      } else {
+        setStatus(r.error || "Couldn't apply those devices.");
+      }
+    } catch (err) {
+      setStatus(err.message);
+    } finally {
+      btn.disabled = false;
+    }
+  });
+
+  selIn.addEventListener("change", () => { setMeter("", 0); note("input", "Press TEST MIC and say something."); setStatus(""); });
+  selOut.addEventListener("change", () => { note("output", "Press TEST SPEAKER to hear a tone."); setStatus(""); });
+  $("gear").addEventListener("click", openAudio);
+  $("audio-cancel").addEventListener("click", () => dlg.close());
+  dlg.addEventListener("click", (e) => { if (e.target === dlg) dlg.close(); });
+  dlg.addEventListener("close", () => input.focus());
 
   // ------------------------------------------------------------------ boot
 

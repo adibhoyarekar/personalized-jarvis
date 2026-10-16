@@ -56,6 +56,8 @@ def test_hud_assets_exist() -> None:
     js = (ASSETS / "hud.js").read_text(encoding="utf-8")
     for kind in ("hello", "state", "user", "reply", "done", "notice", "note", "controls", "level", "stats", "tool", "log", "shutdown"):
         assert f"{kind}(" in js, kind
+    for element in ("gear", "audio", "dev-in", "dev-out", "test-in", "test-out", "audio-apply", "audio-cancel"):
+        assert f'id="{element}"' in html and f'"{element}"' in js, element
 
 
 def test_stats_sampler_reports_numbers() -> None:
@@ -88,6 +90,21 @@ class HudActions:
 
     def window_closed(self) -> None:
         self.closed.set()
+
+    def audio_devices(self) -> dict[str, Any]:
+        return {"input": {"options": [{"index": 3, "name": "Kreo Sonik", "api": "MME"}], "selected": 3, "default": 3},
+                "output": {"options": [], "selected": None, "default": None}}
+
+    def set_audio_devices(self, input_device: int | None, output_device: int | None) -> None:
+        if input_device == 99:
+            raise RuntimeError("That microphone can't be opened.")
+        self.devices = (input_device, output_device)
+
+    def test_speaker(self, device: int | None) -> None:
+        self.tested = device
+
+    def test_microphone(self, device: int | None) -> float:
+        return 0.03
 
 
 @pytest.fixture
@@ -167,6 +184,27 @@ def test_hud_streams_events_and_takes_commands(hud: HudWindow) -> None:
     controls = read_events(resp, until="controls")[-1]
     assert controls["muted"] is True
     conn.close()
+
+
+def test_hud_audio_settings_routes(hud: HudWindow) -> None:
+    assert request(hud, "GET", "/api/audio")[0] == 403
+    status, body = request(hud, "GET", f"/api/audio?t={hud.token}")
+    assert status == 200 and json.loads(body)["input"]["selected"] == 3
+    h = post_headers(hud)
+    assert request(hud, "POST", "/api/audio", {"input": 3}, h)[0] == 400  # both are required
+    assert request(hud, "POST", "/api/audio", {"input": "3", "output": None}, h)[0] == 400
+    assert request(hud, "POST", "/api/audio", {"input": True, "output": None}, h)[0] == 400
+    status, body = request(hud, "POST", "/api/audio", {"input": 3, "output": None}, h)
+    assert status == 200 and json.loads(body) == {"ok": True}
+    assert hud.fake.devices == (3, None)  # type: ignore[attr-defined]
+    status, body = request(hud, "POST", "/api/audio", {"input": 99, "output": 5}, h)
+    assert json.loads(body) == {"ok": False, "error": "That microphone can't be opened."}
+    assert hud.fake.devices == (3, None)  # type: ignore[attr-defined]
+    status, body = request(hud, "POST", "/api/audio/test", {"kind": "output", "device": 5}, h)
+    assert json.loads(body)["ok"] and hud.fake.tested == 5  # type: ignore[attr-defined]
+    status, body = request(hud, "POST", "/api/audio/test", {"kind": "input", "device": None}, h)
+    assert json.loads(body) == {"ok": True, "level": mic_level(0.03)}
+    assert request(hud, "POST", "/api/audio/test", {"kind": "camera", "device": 1}, h)[0] == 400
 
 
 def test_hud_reports_a_closed_window_but_not_a_reload(hud: HudWindow) -> None:
