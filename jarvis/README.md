@@ -144,13 +144,16 @@ after Jarvis goes idle. On Windows, clicks pass straight through it.
 ## Start with Windows
 
 ```powershell
-.venv\Scripts\python scripts\install_startup.py          # Task Scheduler (preferred)
-.venv\Scripts\python scripts\install_startup.py --status
-.venv\Scripts\python scripts\uninstall_startup.py        # remove it again
+python scripts\install_startup.py                 # start at login (Task Scheduler)
+python scripts\install_startup.py --desktop       # ...and add a Jarvis shortcut to the desktop
+python scripts\install_startup.py --desktop-only  # just the desktop shortcut
+python scripts\install_startup.py --status
+python scripts\uninstall_startup.py               # stop starting at login
 ```
 
-This creates a hidden Task Scheduler task named **"Jarvis Assistant"**. It
-runs `.venv\Scripts\pythonw.exe main.py --wake --tray` 30 seconds after you
+Use the same Python you installed the requirements with (`.venv\Scripts\python`
+if you made a virtual environment). This creates a hidden Task Scheduler task named
+**"Jarvis Assistant"**. It runs `pythonw.exe main.py --wake --tray` 30 seconds after you
 log in (so audio devices are ready), with no console window. If Task
 Scheduler isn't available, a registry Run key (`HKCU\...\Run\JarvisAssistant`)
 is used instead. `scripts\run_jarvis.bat` starts the same thing by hand.

@@ -36,8 +36,8 @@ def find_pythonw(project_dir: Path = PROJECT_DIR) -> Path:
         if candidate.is_file():
             return candidate
     raise FileNotFoundError(
-        "Couldn't find pythonw.exe. Create the virtual environment first (see README), "
-        "then run this script with it: .venv\\Scripts\\python scripts\\install_startup.py"
+        "Couldn't find pythonw.exe next to this Python. Run this script with the Python "
+        "you installed Jarvis's requirements into (see README)."
     )
 
 
@@ -132,6 +132,46 @@ def install(args: list[str] | None = None, use_task: bool = True) -> str:
     with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY, 0, winreg.KEY_SET_VALUE) as key:
         winreg.SetValueEx(key, RUN_VALUE, 0, winreg.REG_SZ, command_line(pythonw, main_py, args))
     return f"Registry Run key '{RUN_VALUE}' set (Task Scheduler wasn't available): {command_line(pythonw, main_py, args)}"
+
+
+SHORTCUT_NAME = "Jarvis.lnk"
+
+
+def _ps_quote(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'"
+
+
+def shortcut_script(pythonw: Path, main_py: Path, workdir: Path, args: list[str] | None = None) -> str:
+    """PowerShell that writes a desktop .lnk launching Jarvis hidden.
+
+    The Desktop folder comes from Windows itself so OneDrive-redirected desktops work.
+    """
+    arguments = " ".join([f'"{main_py}"', *(args or DEFAULT_ARGS)])
+    return "; ".join([
+        "$desktop = [Environment]::GetFolderPath('Desktop')",
+        f"$link = Join-Path $desktop {_ps_quote(SHORTCUT_NAME)}",
+        "$s = (New-Object -ComObject WScript.Shell).CreateShortcut($link)",
+        f"$s.TargetPath = {_ps_quote(str(pythonw))}",
+        f"$s.Arguments = {_ps_quote(arguments)}",
+        f"$s.WorkingDirectory = {_ps_quote(str(workdir))}",
+        "$s.Description = 'Start the Jarvis voice assistant'",
+        "$s.Save()",
+        "Write-Output $link",
+    ])
+
+
+def create_desktop_shortcut(args: list[str] | None = None) -> str:
+    """Put a Jarvis shortcut on the desktop. Returns the shortcut's path."""
+    if sys.platform != "win32":
+        raise OSError("Desktop shortcuts are for Windows only")
+    script = shortcut_script(find_pythonw(), PROJECT_DIR / "main.py", PROJECT_DIR, args)
+    result = subprocess.run(  # noqa: S603, S607
+        ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
+        capture_output=True, text=True, timeout=30,
+    )
+    if result.returncode != 0:
+        raise OSError(f"Couldn't create the shortcut: {(result.stderr or result.stdout).strip()}")
+    return result.stdout.strip()
 
 
 def _remove_run_key() -> bool:

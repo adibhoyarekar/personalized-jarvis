@@ -12,7 +12,7 @@ from core.app import greeting_text
 from core.config import Config
 from core.connectivity import ConnectivityMonitor
 from core.offline import OfflineRouter
-from core.startup import command_line, task_xml
+from core.startup import command_line, shortcut_script, task_xml
 from core.state import AssistantState as S
 from ui.overlay import BASE_ALPHA, OverlayModel
 
@@ -104,6 +104,16 @@ def test_startup_task_xml_and_run_key() -> None:
     assert root.find(".//t:Settings/t:Hidden", ns).text == "true"
     assert root.find(".//t:Settings/t:DisallowStartIfOnBatteries", ns).text == "false"
     assert command_line(pyw, main) == f'"{pyw}" "{main}" --wake --tray'
+
+
+def test_desktop_shortcut_script_quotes_paths() -> None:
+    pyw = Path("C:/Python314/pythonw.exe")
+    main = Path("C:/Users/O'Brien/jarvis/main.py")
+    script = shortcut_script(pyw, main, main.parent)
+    assert "GetFolderPath('Desktop')" in script
+    assert f"$s.TargetPath = '{pyw}'" in script
+    assert "O''Brien" in script and "O'Brien" not in script.replace("O''Brien", "")
+    assert f"""$s.Arguments = '"{str(main).replace("'", "''")}" --wake --tray'""" in script
 
 
 def test_voice_mute_and_mode_switch() -> None:
